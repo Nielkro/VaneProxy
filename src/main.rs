@@ -57,7 +57,9 @@ async fn main() {
         }
     };
 
-    tracing::error!(listen = ?cfg.listen, "penik-proxy started");
+    // Startup/shutdown go to stderr directly: they must always be visible,
+    // but they are not errors, so they must not pollute error alerting.
+    eprintln!("penik-proxy started on {:?}", cfg.listen);
 
     // Accept loop per socket, with graceful shutdown on Ctrl-C / SIGTERM.
     let mut tasks = Vec::new();
@@ -83,7 +85,7 @@ async fn main() {
     }
 
     let _ = tokio::signal::ctrl_c().await;
-    tracing::error!("shutdown signal, exiting");
+    eprintln!("penik-proxy: shutdown signal, exiting");
     for t in tasks {
         t.abort();
     }
@@ -124,7 +126,9 @@ fn bind_one(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
         sock.set_only_v6(true)?;
     }
     sock.bind(&addr.into())?;
-    sock.listen(1024)?;
+    // The kernel clamps to net.core.somaxconn anyway; 4096 survives
+    // connection bursts without dropping SYNs on a busy :443.
+    sock.listen(4096)?;
     sock.set_nonblocking(true)?;
     let std_lis: std::net::TcpListener = sock.into();
     TcpListener::from_std(std_lis)

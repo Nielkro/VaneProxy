@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -84,8 +84,36 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct Backend {
-    pub addr: SocketAddr,
+    pub addr: BackendAddr,
     pub send_proxy_protocol: bool,
+}
+
+/// Backend endpoint: TCP socket or Unix domain socket.
+///
+/// TOML form: `"127.0.0.1:8443"` or `"unix:///run/penik/caddy.sock"`.
+/// The `unix:` prefix (single slash) is accepted as well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendAddr {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+impl BackendAddr {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let path = raw
+            .strip_prefix("unix://")
+            .or_else(|| raw.strip_prefix("unix:"));
+        if let Some(path) = path {
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(format!("unix socket path must be absolute: {raw}"));
+            }
+            return Ok(Self::Unix(path));
+        }
+        raw.parse::<SocketAddr>()
+            .map(Self::Tcp)
+            .map_err(|_| format!("bad backend addr: {raw} (want IP:port or unix:///abs/path)"))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -130,9 +158,7 @@ impl Config {
         }
         let mut backends = HashMap::with_capacity(file.backends.len());
         for (name, b) in &file.backends {
-            let addr: SocketAddr = b.addr.parse().map_err(|_| {
-                ConfigError::Invalid(format!("bad addr for backend '{name}': {}", b.addr))
-            })?;
+            let addr = BackendAddr::parse(&b.addr).map_err(ConfigError::Invalid)?;
             backends.insert(
                 name.clone(),
                 Backend {
@@ -168,13 +194,23 @@ impl Config {
             routes.insert(normalized, r.backend.clone());
         }
 
+        let log_level = file.log_level.unwrap_or_else(|| "error".to_string());
+        if !matches!(
+            log_level.as_str(),
+            "error" | "warn" | "info" | "debug" | "trace"
+        ) {
+            return Err(ConfigError::Invalid(format!(
+                "bad log_level: '{log_level}' (want error|warn|info|debug|trace)"
+            )));
+        }
+
         Ok(Self {
             listen,
             strict_listen: file.strict_listen,
             client_hello_timeout_ms: file.client_hello_timeout_ms,
             backend_connect_timeout_ms: file.backend_connect_timeout_ms,
             max_client_hello_bytes: file.max_client_hello_bytes.max(64),
-            log_level: file.log_level.unwrap_or_else(|| "error".to_string()),
+            log_level,
             access_log: file.access_log,
             backends,
             default_backend: file.default_backend,
@@ -243,5 +279,48 @@ backend = "xray"
     fn rejects_empty_listen() {
         let text = BASE.replace("listen = [\"0.0.0.0:443\"]", "listen = []");
         assert!(Config::parse(&text).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_log_level() {
+        let bad = BASE.replace(
+            "default_backend = \"caddy\"",
+            "default_backend = \"caddy\"\nlog_level = \"ololo\"",
+        );
+        assert!(Config::parse(&bad).is_err());
+        let ok = BASE.replace(
+            "default_backend = \"caddy\"",
+            "default_backend = \"caddy\"\nlog_level = \"info\"",
+        );
+        assert!(Config::parse(&ok).is_ok());
+    }
+
+    #[test]
+    fn parses_unix_backend_addr() {
+        assert_eq!(
+            BackendAddr::parse("unix:///run/penik/caddy.sock"),
+            Ok(BackendAddr::Unix(PathBuf::from("/run/penik/caddy.sock")))
+        );
+        assert_eq!(
+            BackendAddr::parse("unix:/run/penik/caddy.sock"),
+            Ok(BackendAddr::Unix(PathBuf::from("/run/penik/caddy.sock")))
+        );
+        assert!(BackendAddr::parse("unix:relative.sock").is_err());
+        assert!(BackendAddr::parse("not-an-addr").is_err());
+        assert!(matches!(
+            BackendAddr::parse("127.0.0.1:8443"),
+            Ok(BackendAddr::Tcp(_))
+        ));
+    }
+
+    #[test]
+    fn routes_to_unix_backend() {
+        let text = BASE.replace(
+            "addr = \"127.0.0.1:8444\"",
+            "addr = \"unix:///run/penik/caddy.sock\"",
+        );
+        let cfg = Config::parse(&text).unwrap();
+        assert_eq!(cfg.route(Some("unknown.example.com")), "caddy");
+        assert!(matches!(cfg.backend("caddy").addr, BackendAddr::Unix(_)));
     }
 }
