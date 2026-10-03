@@ -1,0 +1,23 @@
+[package]
+name = "penik-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "SNI-based TCP router: :443 -> Xray (raw) / Caddy (PROXY protocol v2)"
+license = "MIT"
+
+[[bin]]
+name = "penik-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+socket2 = "0.5"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
