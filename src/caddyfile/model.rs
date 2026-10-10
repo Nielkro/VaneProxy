@@ -99,4 +99,8 @@ pub enum Directive {
     Rewrite(RewriteConfig),
     /// `handle [<matcher>] { ... }`
     Handle(HandleBlock),
+    /// `header_up [+|-]<name> [value]`
+    HeaderUp(HeaderOp),
+    /// `header_down [+|-]<name> [value]`
+    HeaderDown(HeaderOp),
 }

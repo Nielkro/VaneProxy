@@ -18,6 +18,13 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
+instant-acme = { version = "0.8", features = ["rcgen"] }
+rcgen = "0.14"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rustls-pki-types = "1"
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

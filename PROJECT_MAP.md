@@ -17,6 +17,11 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/caddyfile/lexer.rs` — Caddyfile tokenizer with exact line/column tracking and comment handling.
 - `src/caddyfile/parser.rs` — Fail-fast recursive descent parser for Caddyfile syntax.
 - `src/caddyfile/cluster.rs` — Apex domain extraction, wildcard consolidation, and SNI site matching.
+- `src/acme/mod.rs` — ACME module root and lifecycle integration tests.
+- `src/acme/dns_cloudflare.rs` — Cloudflare DNS-01 API client for TXT challenge records.
+- `src/acme/alpn_challenge.rs` — Ephemeral TLS-ALPN-01 challenge certificate manager (RFC 8737).
+- `src/acme/store.rs` — Certificate and credential persistence with 0600 file permissions.
+- `src/acme/manager.rs` — High-level ACME order manager with unified multi-SAN and partitioning fallback.
 - `Cargo.toml` — Package manifest: `penik-proxy` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
