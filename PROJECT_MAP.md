@@ -12,6 +12,11 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/proxy_proto.rs` — PROXY protocol v2 encoder: builds `PROXY` headers for IPv4/IPv6 (with `to_canonical()` for mapped addresses) and `LOCAL` fallback for mixed families.
 - `src/relay.rs` — Per-connection handler: read-loop sniffs first record (fast-path for non-TLS), routes by SNI, connects to backend, writes optional PPv2 header plus buffered bytes, then splices via `copy_bidirectional`.
 - `src/logging.rs` — Tracing setup: quiet `error` default, lifts to `info` when `access_log` is enabled so per-connection lines are visible.
+- `src/caddyfile/mod.rs` — Caddyfile module root, directory loader, and integration tests.
+- `src/caddyfile/model.rs` — AST data structures for Caddyfile site blocks, directives, upstreams, and matchers.
+- `src/caddyfile/lexer.rs` — Caddyfile tokenizer with exact line/column tracking and comment handling.
+- `src/caddyfile/parser.rs` — Fail-fast recursive descent parser for Caddyfile syntax.
+- `src/caddyfile/cluster.rs` — Apex domain extraction, wildcard consolidation, and SNI site matching.
 - `Cargo.toml` — Package manifest: `penik-proxy` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.

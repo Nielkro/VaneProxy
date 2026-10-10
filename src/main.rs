@@ -3,6 +3,7 @@
 //! Listens on :443, sniffs the TLS ClientHello SNI without terminating TLS,
 //! and splices the stream to Xray (raw) or Caddy (with PROXY protocol v2).
 
+pub mod caddyfile;
 mod config;
 mod logging;
 mod proxy_proto;
