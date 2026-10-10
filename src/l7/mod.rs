@@ -28,7 +28,9 @@ where
         async move { handle_site_request(req, &site_ref, peer_addr).await }
     });
 
-    if let Err(e) = builder.serve_connection(io, service).await {
+    let conn = builder.serve_connection_with_upgrades(io, service);
+    tokio::pin!(conn);
+    if let Err(e) = conn.as_mut().await {
         error!(peer = %peer_addr, error = %e, "L7 connection serving error");
     }
 }
