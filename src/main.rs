@@ -1,15 +1,19 @@
-//! PenikProxy: SNI-based TCP router.
+//! PenikProxy: SNI-based TCP router & hybrid reverse proxy.
 //!
-//! Listens on :443, sniffs the TLS ClientHello SNI without terminating TLS,
-//! and splices the stream to Xray (raw) or Caddy (with PROXY protocol v2).
+//! Listens on :443, sniffs the TLS ClientHello SNI and ALPN without terminating TLS for L4 routes,
+//! terminates TLS for configured L7 sites (with Auto-SSL, reverse proxying, WebSockets and static files),
+//! and falls back to default_backend (with PROXY protocol v2).
 
 pub mod acme;
 pub mod caddyfile;
 mod config;
+pub mod l7;
 mod logging;
 mod proxy_proto;
 mod relay;
 mod sni;
+pub mod tls;
+pub mod watcher;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +24,7 @@ use tracing::error;
 
 use crate::config::Config;
 
-/// SNI router: :443 -> Xray / Caddy.
+/// SNI router & hybrid reverse proxy: :443 -> Xray / L7 / Caddy.
 #[derive(Debug, Parser)]
 #[command(name = "penik-proxy", version)]
 struct Args {
@@ -47,6 +51,131 @@ async fn main() {
 
     logging::init(&cfg.log_level, cfg.access_log);
 
+    // Load initial sites from sites_dir if configured
+    let sites = if let Some(dir) = &cfg.sites_dir {
+        match caddyfile::load_sites_dir(dir) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(error = %e, "failed to load sites directory");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let alpn_registry = Arc::new(acme::AlpnChallengeRegistry::new());
+
+    // Initialize TLS and certificate store if configured
+    let mut cert_resolver = None;
+    let mut tls_acceptor = None;
+    let mut acme_mgr = None;
+
+    if let Some(tls_cfg) = &cfg.tls {
+        let storage_dir = tls_cfg
+            .storage_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/var/lib/penik-proxy/certs"));
+        let store = match acme::CertStore::new(&storage_dir) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                error!(error = %e, "failed to initialize certificate store");
+                None
+            }
+        };
+
+        if let Some(store) = store {
+            // Load existing certificates if present
+            if store.has_certificate() {
+                if let (Ok(cert_pem), Ok(key_pem)) =
+                    (store.load_certificate(), store.load_private_key())
+                {
+                    if let Ok(certified_key) = tls::parse_certified_key(&cert_pem, &key_pem) {
+                        let resolver = Arc::new(tls::DynamicCertResolver::new(Some(certified_key)));
+                        if let Ok(server_config) = tls::create_server_config(resolver.clone()) {
+                            tls_acceptor = Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)));
+                            cert_resolver = Some(resolver);
+                        }
+                    }
+                }
+            }
+
+            // Setup ACME manager if email is configured
+            if let Some(email) = &tls_cfg.email {
+                let acme_config = acme::AcmeConfig {
+                    email: email.clone(),
+                    staging: tls_cfg.staging,
+                    storage_dir,
+                    cloudflare_credentials: tls_cfg.cloudflare_credentials.clone(),
+                    cloudflare_token: tls_cfg.cloudflare_token.clone(),
+                };
+                if let Ok(mgr) = acme::AcmeManager::new(acme_config, (*alpn_registry).clone()) {
+                    let mgr_arc = Arc::new(mgr);
+                    acme_mgr = Some(mgr_arc.clone());
+
+                    // Collect domains and run certificate order in background
+                    let mut site_domains = Vec::new();
+                    for s in &sites {
+                        site_domains.extend(s.addresses.clone());
+                    }
+                    if !site_domains.is_empty() {
+                        let mgr_task = mgr_arc.clone();
+                        let resolver_opt = cert_resolver.clone();
+                        tokio::spawn(async move {
+                            if let Ok(()) = mgr_task.ensure_certificates(&site_domains).await {
+                                if let (Ok(cert_pem), Ok(key_pem)) = (
+                                    mgr_task.store().load_certificate(),
+                                    mgr_task.store().load_private_key(),
+                                ) {
+                                    if let Ok(ck) = tls::parse_certified_key(&cert_pem, &key_pem) {
+                                        if let Some(res) = resolver_opt {
+                                            res.set_certified_key(ck);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let state = Arc::new(relay::RuntimeState::new(
+        cfg.clone(),
+        Arc::new(sites),
+        alpn_registry,
+        tls_acceptor,
+    ));
+
+    // Spawn zero-downtime hot reload coordinator
+    watcher::spawn_reload_watcher(
+        state.clone(),
+        args.config.clone(),
+        cfg.sites_dir.clone(),
+        acme_mgr,
+    );
+
+    // Optional HTTP redirect listener
+    if let Some(http_addr) = cfg.http_listen {
+        tokio::spawn(async move {
+            if let Ok(lis) = TcpListener::bind(http_addr).await {
+                while let Ok((mut stream, _)) = lis.accept().await {
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = [0u8; 1024];
+                        if let Ok(n) = stream.read(&mut buf).await {
+                            if n > 0 {
+                                let resp = "HTTP/1.1 301 Moved Permanently\r\nLocation: https:///\r\nConnection: close\r\n\r\n";
+                                let _ = stream.write_all(resp.as_bytes()).await;
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
     let listeners = match bind_all(&cfg).await {
         Ok(l) if !l.is_empty() => l,
         Ok(_) => {
@@ -59,22 +188,19 @@ async fn main() {
         }
     };
 
-    // Startup/shutdown go to stderr directly: they must always be visible,
-    // but they are not errors, so they must not pollute error alerting.
     eprintln!("penik-proxy started on {:?}", cfg.listen);
 
-    // Accept loop per socket, with graceful shutdown on Ctrl-C / SIGTERM.
     let mut tasks = Vec::new();
     for lis in listeners {
-        let cfg = cfg.clone();
+        let state = state.clone();
         tasks.push(tokio::spawn(async move {
             loop {
                 match lis.accept().await {
                     Ok((stream, _)) => {
                         let _ = stream.set_nodelay(true);
-                        let cfg = cfg.clone();
+                        let state = state.clone();
                         tokio::spawn(async move {
-                            relay::handle_conn(stream, cfg).await;
+                            relay::handle_conn(stream, state).await;
                         });
                     }
                     Err(e) => {
@@ -94,10 +220,6 @@ async fn main() {
 }
 
 /// Bind every address from `listen`.
-///
-/// IPv6 sockets get `IPV6_V6ONLY=true` explicitly: on Linux the default
-/// `net.ipv6.bindv6only=0` would otherwise make `[::]:443` swallow IPv4
-/// and the `0.0.0.0:443` bind would fail with `EADDRINUSE`.
 async fn bind_all(cfg: &Config) -> std::io::Result<Vec<TcpListener>> {
     let mut out = Vec::new();
     for addr in &cfg.listen {
@@ -128,8 +250,6 @@ fn bind_one(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
         sock.set_only_v6(true)?;
     }
     sock.bind(&addr.into())?;
-    // The kernel clamps to net.core.somaxconn anyway; 4096 survives
-    // connection bursts without dropping SYNs on a busy :443.
     sock.listen(4096)?;
     sock.set_nonblocking(true)?;
     let std_lis: std::net::TcpListener = sock.into();

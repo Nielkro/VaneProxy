@@ -22,9 +22,18 @@ instant-acme = { version = "0.8", features = ["rcgen"] }
 rcgen = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rustls-pki-types = "1"
+rustls-pemfile = "2"
 serde_json = "1"
 sha2 = "0.10"
 base64 = "0.22"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+mime_guess = "2"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+arc-swap = "1"
+notify = "8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

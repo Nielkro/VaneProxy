@@ -11,6 +11,19 @@ max_client_hello_bytes = 16389
 log_level = "error"
 access_log = false
 
+# Directory with Caddyfile sites (*.caddy, *.conf)
+sites_dir = "/etc/penik-proxy/sites-enabled"
+
+# Optional HTTP :80 redirect listener (301 -> https)
+# http_listen = "0.0.0.0:80"
+
+[tls]
+email = "admin@slavchat.ru"
+storage_dir = "/var/lib/penik-proxy/certs"
+cloudflare_credentials = "/etc/penik/cloudflare.ini"
+# cloudflare_token = "..."
+# staging = true
+
 default_backend = "caddy"
 
 [[routes]]

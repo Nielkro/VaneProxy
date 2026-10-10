@@ -4,51 +4,84 @@
 //! Never panics on untrusted input: any truncation or malformed
 //! structure yields `None`, and the caller routes to the default backend.
 
+/// Parsed ClientHello metadata: SNI and ALPN protocols.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientHelloInfo {
+    /// Normalized SNI, if present.
+    pub sni: Option<String>,
+    /// Negotiated ALPN protocol names, if present.
+    pub alpn: Vec<String>,
+}
+
+impl ClientHelloInfo {
+    /// Returns true if the client requested the ACME TLS-ALPN-01 protocol (`acme-tls/1`).
+    pub fn is_acme_tls_alpn(&self) -> bool {
+        self.alpn.iter().any(|p| p == "acme-tls/1")
+    }
+}
+
 /// Parse a buffered TLS record and return the normalized SNI, if present.
-///
-/// Expects `buf` to hold the first TLS record (5-byte record header +
-/// record payload). Returns `None` for non-TLS, non-ClientHello,
-/// missing SNI, or any malformed input.
 pub fn parse_sni(buf: &[u8]) -> Option<String> {
+    parse_client_hello(buf).sni
+}
+
+/// Parse a buffered TLS record and return both SNI and ALPN protocols.
+pub fn parse_client_hello(buf: &[u8]) -> ClientHelloInfo {
+    let mut info = ClientHelloInfo::default();
+
     // Need at least: record header (5) + handshake header (4).
     if buf.len() < 9 {
-        return None;
+        return info;
     }
     // Record header: ContentType must be Handshake (0x16).
     if buf[0] != 0x16 {
-        return None;
+        return info;
     }
     // Handshake header: type must be ClientHello (0x01).
     if buf[5] != 0x01 {
-        return None;
+        return info;
     }
 
     let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
-    // Body of the handshake message starts after 9 bytes.
-    // Be lenient: parse what we have even if the record is truncated,
-    // the cursor checks below will just run out and return None.
     let body_end = (5 + record_len).min(buf.len());
     if body_end <= 9 {
-        return None;
+        return info;
     }
     let body = &buf[9..body_end];
 
     let mut cur = Cursor::new(body);
     // ProtocolVersion (2) + Random (32).
-    cur.skip(2 + 32)?;
+    if cur.skip(2 + 32).is_none() {
+        return info;
+    }
     // Session ID.
-    let sid_len = cur.u8()? as usize;
-    cur.skip(sid_len)?;
+    let sid_len = match cur.u8() {
+        Some(l) => l as usize,
+        None => return info,
+    };
+    if cur.skip(sid_len).is_none() {
+        return info;
+    }
     // Cipher suites.
-    let cs_len = cur.u16()? as usize;
-    cur.skip(cs_len)?;
+    let cs_len = match cur.u16() {
+        Some(l) => l as usize,
+        None => return info,
+    };
+    if cur.skip(cs_len).is_none() {
+        return info;
+    }
     // Compression methods.
-    let comp_len = cur.u8()? as usize;
-    cur.skip(comp_len)?;
-    // Extensions (may be absent in very old ClientHello -> no SNI).
+    let comp_len = match cur.u8() {
+        Some(l) => l as usize,
+        None => return info,
+    };
+    if cur.skip(comp_len).is_none() {
+        return info;
+    }
+    // Extensions.
     let ext_total = match cur.u16() {
         Some(v) => v as usize,
-        None => return None,
+        None => return info,
     };
     let ext_end = (cur.pos + ext_total).min(cur.data.len());
 
@@ -59,13 +92,39 @@ pub fn parse_sni(buf: &[u8]) -> Option<String> {
         let data_end = (cur.pos + ext_len).min(ext_end);
         if ext_type == 0x0000 {
             if let Some(name) = parse_server_name(cur.data, cur.pos, data_end) {
-                return normalize_sni(&name);
+                info.sni = normalize_sni(&name);
             }
-            return None;
+        } else if ext_type == 0x0010 {
+            info.alpn = parse_alpn(cur.data, cur.pos, data_end);
         }
         cur.pos = data_end;
     }
-    None
+
+    info
+}
+
+fn parse_alpn(data: &[u8], start: usize, end: usize) -> Vec<String> {
+    if end > data.len() || start + 2 > end {
+        return Vec::new();
+    }
+    let list_len = u16::from_be_bytes([data[start], data[start + 1]]) as usize;
+    let mut pos = start + 2;
+    let list_end = (pos + list_len).min(end);
+    let mut protocols = Vec::new();
+
+    while pos < list_end {
+        let proto_len = data[pos] as usize;
+        pos += 1;
+        if pos + proto_len > list_end {
+            break;
+        }
+        if let Ok(proto) = std::str::from_utf8(&data[pos..pos + proto_len]) {
+            protocols.push(proto.to_string());
+        }
+        pos += proto_len;
+    }
+
+    protocols
 }
 
 /// Parse the ServerNameList inside extension 0x0000.

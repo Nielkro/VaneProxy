@@ -22,6 +22,13 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/acme/alpn_challenge.rs` — Ephemeral TLS-ALPN-01 challenge certificate manager (RFC 8737).
 - `src/acme/store.rs` — Certificate and credential persistence with 0600 file permissions.
 - `src/acme/manager.rs` — High-level ACME order manager with unified multi-SAN and partitioning fallback.
+- `src/l7/mod.rs` — Layer-7 reverse proxy and static asset HTTP server engine.
+- `src/l7/proxy.rs` — Upstream HTTP reverse proxy forwarder with WebSocket upgrade support.
+- `src/l7/service.rs` — Request dispatcher handling static files, reverse proxy, rewrites, and redirects.
+- `src/l7/static_files.rs` — Static file server with traversal protection and MIME detection.
+- `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
+- `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with hot-reloading support.
+- `src/watcher.rs` — Zero-downtime hot reload coordinator with SIGHUP and 500ms debounce.
 - `Cargo.toml` — Package manifest: `penik-proxy` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.

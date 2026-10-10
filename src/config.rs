@@ -27,10 +27,26 @@ struct FileConfig {
     log_level: Option<String>,
     #[serde(default)]
     access_log: bool,
+    #[serde(default)]
+    pub sites_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub http_listen: Option<String>,
+    #[serde(default)]
+    pub tls: Option<TlsConf>,
     backends: HashMap<String, BackendConf>,
     default_backend: String,
     #[serde(default)]
     routes: Vec<RouteConf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TlsConf {
+    pub email: Option<String>,
+    pub storage_dir: Option<PathBuf>,
+    pub cloudflare_credentials: Option<PathBuf>,
+    pub cloudflare_token: Option<String>,
+    #[serde(default)]
+    pub staging: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +96,9 @@ pub struct Config {
     pub default_backend: String,
     /// Normalized SNI -> backend name.
     pub routes: HashMap<String, String>,
+    pub sites_dir: Option<PathBuf>,
+    pub http_listen: Option<SocketAddr>,
+    pub tls: Option<TlsConf>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +234,15 @@ impl Config {
             backends,
             default_backend: file.default_backend,
             routes,
+            sites_dir: file.sites_dir,
+            http_listen: match file.http_listen.as_deref() {
+                Some(raw) => Some(
+                    raw.parse::<SocketAddr>()
+                        .map_err(|_| ConfigError::Invalid(format!("bad http_listen addr: {raw}")))?,
+                ),
+                None => None,
+            },
+            tls: file.tls,
         })
     }
 
