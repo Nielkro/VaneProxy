@@ -77,10 +77,19 @@ pub async fn serve_static_file(
         }
     };
 
+    let content_len = if is_head {
+        match fs::metadata(&file_path).await {
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        }
+    } else {
+        body_bytes.len() as u64
+    };
+
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, meta.len().to_string())
+        .header(header::CONTENT_LENGTH, content_len.to_string())
         .body(crate::l7::full_box(body_bytes))
         .unwrap();
 
