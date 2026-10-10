@@ -172,11 +172,11 @@ http-body-util = "0.1"
 
 # ACME & REST
 instant-acme = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls", "json"] }
 
 # State, Reload & Watching
 arc-swap = "1"
-notify = "6"
+notify = "8"
 
 # (Future extension: Lua scripting engine)
 # mlua = { version = "0.12", features = ["lua54", "async", "vendored"] }
