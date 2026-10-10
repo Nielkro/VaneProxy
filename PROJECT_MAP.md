@@ -30,3 +30,4 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `plan/03-implementation.md` — Crate layout, dependency choices, `handle_conn` pseudocode, development steps.
 - `plan/04-deploy.md` — systemd unit with `CAP_NET_BIND_SERVICE`, Caddy `:8444` with per-port `proxy_protocol` wrapper (`xcaddy`), Xray untouched, cutover order.
 - `plan/05-testing-risks.md` — Unit/integration/manual test matrix, ECH and fragmentation risks, out-of-MVP scope (metrics, QUIC, TLS termination).
+- `plan/06-reverse-proxy-auto-ssl.md` — Hybrid L4/L7 architecture, Caddyfile parser, unified multi-domain SAN Auto-SSL (DNS-01 / TLS-ALPN-01), reverse proxy, static file server, and hot-reload.
