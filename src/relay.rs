@@ -205,7 +205,17 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     }
 
     let hello_info = parse_client_hello(&buf);
+    let is_alpn = hello_info.is_acme_tls_alpn();
     let sni = hello_info.sni;
+
+    // 0. Check ACME TLS-ALPN-01 challenge probe
+    if is_alpn {
+        if let Some(sni_name) = sni.as_deref() {
+            if state.alpn_registry.get_challenge(sni_name).is_some() {
+                debug!(sni = %sni_name, "received ACME TLS-ALPN-01 probe");
+            }
+        }
+    }
 
     // 1. Check L4 passthrough routes in config.toml
     let l4_backend_name = sni.as_deref().and_then(|s| cfg.routes.get(s));
@@ -227,13 +237,14 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
                     let acceptor = acceptor.clone();
                     let site_arc = Arc::new(site.clone());
                     let peer_addr = peer.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
+                    let sni_owned = sni_name.to_string();
                     tokio::spawn(async move {
                         match acceptor.accept(prefixed).await {
                             Ok(tls_stream) => {
                                 serve_l7_stream(tls_stream, site_arc, peer_addr).await;
                             }
                             Err(e) => {
-                                warn!(sni = %sni_name, error = %e, "TLS handshake failed for L7 site");
+                                warn!(sni = %sni_owned, error = %e, "TLS handshake failed for L7 site");
                             }
                         }
                     });

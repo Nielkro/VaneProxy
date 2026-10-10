@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use http_body_util::combinators::BoxBody;
 use hyper::{
     header, Method, Request, Response, StatusCode, Uri,
 };
@@ -32,7 +32,7 @@ pub async fn handle_site_request(
                 return Ok(Response::builder()
                     .status(status)
                     .header(header::LOCATION, &cfg.target)
-                    .body(Full::new(Bytes::from(format!("Redirecting to {}", cfg.target))).boxed())
+                    .body(crate::l7::full_box(Bytes::from(format!("Redirecting to {}", cfg.target))))
                     .unwrap());
             }
         }
@@ -64,8 +64,7 @@ pub async fn handle_site_request(
     if let (Some(root), true) = (root_path.as_ref(), has_file_server) {
         let is_head = req.method() == Method::HEAD;
         if let Some(resp) = serve_static_file(root, &req_path, is_head).await {
-            let (parts, body) = resp.into_parts();
-            return Ok(Response::from_parts(parts, body.boxed()));
+            return Ok(resp);
         }
     }
 
@@ -88,6 +87,6 @@ pub async fn handle_site_request(
     // Default 404 Not Found
     Ok(Response::builder()
         .status(StatusCode::NOT_FOUND)
-        .body(Full::new(Bytes::from("404 Not Found")).boxed())
+        .body(crate::l7::full_box(Bytes::from("404 Not Found")))
         .unwrap())
 }

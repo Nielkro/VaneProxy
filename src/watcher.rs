@@ -9,7 +9,6 @@ use tracing::{error, info, warn};
 
 use crate::acme::manager::AcmeManager;
 use crate::caddyfile::load_sites_dir;
-use crate::caddyfile::model::SiteBlock;
 use crate::config::Config;
 use crate::relay::RuntimeState;
 

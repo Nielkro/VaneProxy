@@ -57,7 +57,7 @@ impl AlpnChallengeRegistry {
         // Build critical custom extension with OID 1.3.6.1.5.5.7.1.31
         let acme_oid = &[1, 3, 6, 1, 5, 5, 7, 1, 31];
         let mut ext = CustomExtension::from_oid_content(acme_oid, octet_string_der);
-        ext.set_critical(true);
+        ext.set_criticality(true);
 
         // Generate self-signed certificate with domain in SAN
         let mut params = CertificateParams::new(vec![domain.to_string()])?;

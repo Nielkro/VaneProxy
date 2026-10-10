@@ -3,7 +3,7 @@
 pub mod resolver;
 
 use std::sync::Arc;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::CertificateDer;
 use rustls::server::ServerConfig;
 use rustls::sign::CertifiedKey;
 use thiserror::Error;

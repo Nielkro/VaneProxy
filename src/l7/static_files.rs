@@ -1,8 +1,7 @@
 //! Static asset streaming with MIME detection and path traversal protection.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use bytes::Bytes;
-use http_body_util::Full;
 use hyper::{header, Response, StatusCode};
 use tokio::fs;
 
@@ -15,7 +14,7 @@ pub async fn serve_static_file(
     root: &Path,
     req_path: &str,
     is_head: bool,
-) -> Option<Response<Full<Bytes>>> {
+) -> Option<Response<http_body_util::combinators::BoxBody<Bytes, hyper::Error>>> {
     // Sanitize path against directory traversal
     let clean_path = req_path.trim_start_matches('/');
     let target = root.join(clean_path);
@@ -44,7 +43,7 @@ pub async fn serve_static_file(
         return Some(
             Response::builder()
                 .status(StatusCode::FORBIDDEN)
-                .body(Full::new(Bytes::from("403 Forbidden")))
+                .body(crate::l7::full_box(Bytes::from("403 Forbidden")))
                 .unwrap(),
         );
     }
@@ -82,7 +81,7 @@ pub async fn serve_static_file(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, meta.len().to_string())
-        .body(Full::new(body_bytes))
+        .body(crate::l7::full_box(body_bytes))
         .unwrap();
 
     Some(response)

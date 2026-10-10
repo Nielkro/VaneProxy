@@ -136,10 +136,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
         let mut token_buf = String::new();
 
         while let Some(&c) = chars.peek() {
-            if c.is_whitespace() || c == '{' || c == '}' || c == '#' {
-                break;
-            }
-            if c == '/' && chars.clone().nth(1) == Some('/') {
+            if c.is_whitespace() || c == '{' || c == '}' {
                 break;
             }
             token_buf.push(c);

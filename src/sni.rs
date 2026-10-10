@@ -21,6 +21,7 @@ impl ClientHelloInfo {
 }
 
 /// Parse a buffered TLS record and return the normalized SNI, if present.
+#[allow(dead_code)]
 pub fn parse_sni(buf: &[u8]) -> Option<String> {
     parse_client_hello(buf).sni
 }

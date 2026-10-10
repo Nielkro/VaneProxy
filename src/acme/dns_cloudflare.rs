@@ -30,7 +30,7 @@ pub enum CloudflareError {
 /// Cloudflare DNS client for ACME DNS-01 challenges.
 #[derive(Debug, Clone)]
 pub struct CloudflareDns {
-    api_token: String,
+    pub api_token: String,
     client: reqwest::Client,
 }
 

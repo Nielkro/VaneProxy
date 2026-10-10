@@ -1,12 +1,11 @@
 //! High-level ACME order and renewal manager.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine};
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier,
-    LetsEncrypt, NewAccount, NewOrder, OrderStatus,
+    Account, AccountCredentials, ChallengeType, Identifier,
+    LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
-use rcgen::{CertificateParams, KeyPair};
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -20,9 +19,6 @@ use crate::caddyfile::cluster::{consolidate_sans, extract_apex_domain};
 pub enum AcmeError {
     #[error("ACME protocol error: {0}")]
     InstantAcme(#[from] instant_acme::Error),
-
-    #[error("rcgen key generation or CSR error: {0}")]
-    Rcgen(#[from] rcgen::Error),
 
     #[error("certificate storage error: {0}")]
     Store(#[from] crate::acme::store::StoreError),
@@ -101,24 +97,28 @@ impl AcmeManager {
 
         if let Some(account_json) = self.store.load_account() {
             if let Ok(creds) = serde_json::from_str::<AccountCredentials>(&account_json) {
-                if let Ok(account) = Account::from_credentials(creds) {
-                    return Ok(account);
+                if let Ok(builder) = Account::builder() {
+                    if let Ok(account) = builder.from_credentials(creds).await {
+                        return Ok(account);
+                    }
                 }
             }
         }
 
         info!(email = %self.config.email, staging = self.config.staging, "creating new ACME account");
         let contact = format!("mailto:{}", self.config.email);
-        let (account, creds) = Account::create(
-            &NewAccount {
-                contact: &[&contact],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            directory_url,
-            None,
-        )
-        .await?;
+        let builder = Account::builder()?;
+        let (account, creds) = builder
+            .create(
+                &NewAccount {
+                    contact: &[&contact],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                directory_url.to_string(),
+                None,
+            )
+            .await?;
 
         if let Ok(json) = serde_json::to_string_pretty(&creds) {
             let _ = self.store.save_account(&json);
@@ -154,28 +154,22 @@ impl AcmeManager {
 
     /// Orders a certificate for the given SAN list.
     async fn order_certificate(&self, sans: &[String]) -> Result<(), AcmeError> {
-        let mut account = self.get_or_create_account().await?;
+        let account = self.get_or_create_account().await?;
 
         let identifiers: Vec<Identifier> = sans
             .iter()
             .map(|s| Identifier::Dns(s.clone()))
             .collect();
 
-        let mut order = account.new_order(&NewOrder { identifiers: &identifiers }).await?;
+        let new_order = NewOrder::new(&identifiers);
+        let mut order = account.new_order(&new_order).await?;
         let mut created_cf_records: Vec<(String, String)> = Vec::new(); // (zone_id, record_id)
 
         // Process authorizations
-        let mut authz_list = order.authorizations().await?;
-        for authz in &mut authz_list {
-            match authz.status {
-                AuthorizationStatus::Pending => {}
-                _ => continue,
-            }
-
-            let domain = match &authz.identifier {
-                Identifier::Dns(d) => d.clone(),
-            };
-
+        let mut authz_iter = order.authorizations();
+        while let Some(authz_res) = authz_iter.next().await {
+            let mut authz = authz_res?;
+            let domain = authz.identifier().to_string();
             let is_wildcard = domain.starts_with("*.");
 
             // Select challenge
@@ -188,54 +182,41 @@ impl AcmeManager {
                     ))
                 })?;
 
-                let challenge = authz
-                    .challenges
-                    .iter()
-                    .find(|c| c.r#type == ChallengeType::Dns01)
+                let mut challenge = authz
+                    .challenge(ChallengeType::Dns01)
                     .ok_or_else(|| AcmeError::NoSupportedChallenge(domain.clone()))?;
 
-                let key_auth = order.key_authorization(challenge);
+                let key_auth = challenge.key_authorization();
                 let apex = extract_apex_domain(&domain);
                 let zone_id = cf.get_zone_id(&apex).await?;
 
                 let clean_domain = domain.trim_start_matches("*.");
                 let record_name = format!("_acme-challenge.{}", clean_domain);
+                let digest_b64 = BASE64_URL_SAFE_NO_PAD.encode(key_auth.digest());
 
                 let record_id = cf
-                    .create_txt_record(&zone_id, &record_name, key_auth.digest())
+                    .create_txt_record(&zone_id, &record_name, &digest_b64)
                     .await?;
                 created_cf_records.push((zone_id, record_id));
 
-                // Inform ACME server that DNS challenge is ready
-                order.set_challenge_ready(&challenge.url).await?;
+                challenge.set_ready().await?;
             } else {
                 // Use TLS-ALPN-01
-                let challenge = authz
-                    .challenges
-                    .iter()
-                    .find(|c| c.r#type == ChallengeType::TlsAlpn01)
+                let mut challenge = authz
+                    .challenge(ChallengeType::TlsAlpn01)
                     .ok_or_else(|| AcmeError::NoSupportedChallenge(domain.clone()))?;
 
-                let key_auth = order.key_authorization(challenge);
+                let key_auth = challenge.key_authorization();
                 self.alpn_registry
                     .register_challenge(&domain, key_auth.as_str())
                     .map_err(|e| AcmeError::NoSupportedChallenge(format!("ALPN registration: {e}")))?;
 
-                order.set_challenge_ready(&challenge.url).await?;
+                challenge.set_ready().await?;
             }
         }
 
         // Wait for order to become Ready
-        let mut retries = 0;
-        let mut order_status = order.state().status;
-        while order_status == OrderStatus::Pending || order_status == OrderStatus::Processing {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            order_status = order.refresh().await?;
-            retries += 1;
-            if retries > 30 {
-                break;
-            }
-        }
+        let ready_status = order.poll_ready(&RetryPolicy::default()).await?;
 
         // Cleanup temporary records and challenges
         for (zone_id, record_id) in created_cf_records {
@@ -247,38 +228,15 @@ impl AcmeManager {
             self.alpn_registry.remove_challenge(d);
         }
 
-        if order_status != OrderStatus::Ready {
-            return Err(AcmeError::OrderFailed(order_status));
+        if ready_status != OrderStatus::Ready {
+            return Err(AcmeError::OrderFailed(ready_status));
         }
 
-        // Finalize order with CSR
-        let key_pair = KeyPair::generate()?;
-        let mut params = CertificateParams::new(sans.to_vec())?;
-        params.distinguished_name = rcgen::DistinguishedName::new();
-        let csr = params.serialize_request(&key_pair)?;
+        // Finalize order with rcgen (returns private key PEM)
+        let key_pem = order.finalize().await?;
 
-        order.finalize(csr.der()).await?;
-
-        // Poll until Valid
-        retries = 0;
-        while order.state().status != OrderStatus::Valid {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if order.refresh().await? == OrderStatus::Valid {
-                break;
-            }
-            retries += 1;
-            if retries > 30 {
-                return Err(AcmeError::OrderFailed(order.state().status));
-            }
-        }
-
-        // Download certificate chain
-        let cert_chain_pem = order
-            .certificate()
-            .await?
-            .ok_or_else(|| AcmeError::OrderFailed(OrderStatus::Invalid))?;
-
-        let key_pem = key_pair.serialize_pem();
+        // Download signed certificate chain
+        let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
         self.store.save_certificate(&cert_chain_pem)?;
         self.store.save_private_key(&key_pem)?;

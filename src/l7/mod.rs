@@ -32,3 +32,19 @@ where
         error!(peer = %peer_addr, error = %e, "L7 connection serving error");
     }
 }
+
+/// Converts a Bytes buffer into a BoxBody with hyper::Error.
+pub fn full_box(bytes: bytes::Bytes) -> http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error> {
+    use http_body_util::{BodyExt, Full};
+    Full::new(bytes)
+        .map_err(|never: std::convert::Infallible| match never {})
+        .boxed()
+}
+
+/// Converts an empty buffer into a BoxBody with hyper::Error.
+pub fn empty_box() -> http_body_util::combinators::BoxBody<bytes::Bytes, hyper::Error> {
+    use http_body_util::{BodyExt, Empty};
+    Empty::new()
+        .map_err(|never: std::convert::Infallible| match never {})
+        .boxed()
+}

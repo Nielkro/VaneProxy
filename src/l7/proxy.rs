@@ -1,19 +1,65 @@
 //! High-performance reverse proxy forwarder with WebSocket tunneling.
 
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::{
     header::{self, HeaderName, HeaderValue},
-    upgrade::OnUpgrade,
     Request, Response, StatusCode,
 };
 use hyper_util::rt::TokioIo;
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
-use tracing::{error, info};
+use tracing::error;
 
 use crate::caddyfile::model::{HeaderOp, Upstream};
+
+enum TransportStream {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl AsyncRead for TransportStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            TransportStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
+            TransportStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for TransportStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            TransportStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
+            TransportStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            TransportStream::Tcp(s) => Pin::new(s).poll_flush(cx),
+            TransportStream::Unix(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            TransportStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
+            TransportStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Forwards an HTTP request to an upstream target, supporting WebSockets and proxy headers.
 pub async fn forward_request(
@@ -81,36 +127,34 @@ pub async fn forward_request(
     }
 
     // Connect to upstream target
-    let (mut sender, conn) = match upstream {
-        Upstream::Tcp(addr_str) => {
-            let stream = match TcpStream::connect(addr_str).await {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(upstream = %addr_str, error = %e, "failed to connect to TCP upstream");
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Full::new(Bytes::from("502 Bad Gateway: connection failed")).boxed())
-                        .unwrap());
-                }
-            };
-            let io = TokioIo::new(stream);
-            hyper::client::conn::http1::handshake(io).await?
-        }
-        Upstream::Unix(socket_path) => {
-            let stream = match UnixStream::connect(socket_path).await {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(socket = %socket_path.display(), error = %e, "failed to connect to Unix socket upstream");
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Full::new(Bytes::from("502 Bad Gateway: socket connection failed")).boxed())
-                        .unwrap());
-                }
-            };
-            let io = TokioIo::new(stream);
-            hyper::client::conn::http1::handshake(io).await?
-        }
+    let transport = match upstream {
+        Upstream::Tcp(addr_str) => match TcpStream::connect(addr_str).await {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                TransportStream::Tcp(s)
+            }
+            Err(e) => {
+                error!(upstream = %addr_str, error = %e, "failed to connect to TCP upstream");
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(crate::l7::full_box(Bytes::from("502 Bad Gateway: connection failed")))
+                    .unwrap());
+            }
+        },
+        Upstream::Unix(socket_path) => match UnixStream::connect(socket_path).await {
+            Ok(s) => TransportStream::Unix(s),
+            Err(e) => {
+                error!(socket = %socket_path.display(), error = %e, "failed to connect to Unix socket upstream");
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(crate::l7::full_box(Bytes::from("502 Bad Gateway: socket connection failed")))
+                    .unwrap());
+            }
+        },
     };
+
+    let io = TokioIo::new(transport);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
     if is_upgrade {
         tokio::spawn(async move {
@@ -140,7 +184,7 @@ pub async fn forward_request(
                 .status(StatusCode::SWITCHING_PROTOCOLS)
                 .header(header::UPGRADE, "websocket")
                 .header(header::CONNECTION, "Upgrade")
-                .body(Empty::new().boxed())
+                .body(crate::l7::empty_box())
                 .unwrap());
         }
 
