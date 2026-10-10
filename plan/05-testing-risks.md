@@ -31,9 +31,9 @@ ss -s ; journalctl -u penik-proxy -p err
 - **IPv6**: `listen = ["0.0.0.0:443", "[::]:443"]` — два сокета. Для IPv6 сокета обязательно `set_only_v6(true)` через `socket2`, чтобы Linux `sysctl net.ipv6.bindv6only=0` не вызывал `AddrInUse` при бинде `0.0.0.0:443`. На хосте без v6 второй bind упадёт: `strict_listen=true` → fatal с понятным логом. `to_canonical()` для mapped-адресов в PPv2 обязателен.
 - **Два процесса на :443** (старый Caddy не выключен или забыт `https_port 8444`) → `AddrInUse` при старте, громкий error + exit non-zero чтобы systemd ретраил.
 - **Caddy xcaddy + PROXY protocol**: директива `proxy_protocol` требует сборки Caddy с плагином `github.com/caddyserver/proxy-protocol`. При настройке только `servers :8444 { listener_wrappers { proxy_protocol ... tls } }`, `:80` — чистый.
-- **Производительность**: один `accept` + `spawn`, весь хот-пат — `copy_bidirectional`. `splice` осознанно вне MVP. Ботлнек — `LimitNOFILE` и `net.core.somaxconn`.
+- **Производительность**: один `accept` + `spawn`, весь хот-пат — `copy_bidirectional`. `splice` осознанно вне Фазы 1. Ботлнек — `LimitNOFILE` и `net.core.somaxconn`.
 
-## Что НЕ в MVP (Фаза 1)
+## Что НЕ в Фазе 1 (L4 SNI-роутер)
 - SIGHUP hot-reload конфига (только restart; запланирован на Фазу 2).
 - Prometheus `/metrics` (выбран «лог по флагу», метрики не делаем).
 - UDP/QUIC (HTTP/3 на 443/udp — отдельный вопрос, Caddy/Xray сами; TCP-прокси его не трогает).

@@ -166,9 +166,9 @@ rcgen = "0.14"
 # HTTP & Networking
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
-http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 mime_guess = "2"
+http-body-util = "0.1"
 
 # ACME & REST
 instant-acme = "0.8"
@@ -177,6 +177,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # State, Reload & Watching
 arc-swap = "1"
 notify = "6"
+
+# (Future extension: Lua scripting engine)
+# mlua = { version = "0.12", features = ["lua54", "async", "vendored"] }
 ```
 
 ### 6.2 Module Breakdown
@@ -203,11 +206,11 @@ notify = "6"
 
 ---
 
-## 7. Phased Implementation Roadmap & Test Plan
+## 7. Implementation Roadmap & Test Plan (Stages)
 
-Each phase includes parallel unit/integration tests with explicit Definition of Done (DoD).
+Each stage within Phase 2 includes parallel unit/integration tests with explicit Definition of Done (DoD).
 
-### Phase 1: Caddyfile Parser & Domain Clustering
+### Stage 1: Caddyfile Parser & Domain Clustering
 - **Tasks**: Implement `lexer.rs`, `parser.rs`, and `cluster.rs`.
 - **Parallel Tests**:
   - Unit tests for tokenizer (comments, quoted strings, block nesting).
@@ -215,7 +218,7 @@ Each phase includes parallel unit/integration tests with explicit Definition of 
   - Clustering test: `[ad1.slavchat.ru, ad2.slavchat.ru, slavchat.ru, ad1.penik.ru]` correctly clusters into `[slavchat.ru, *.slavchat.ru, penik.ru, *.penik.ru]`.
 - **DoD**: All unit tests pass; CLI command `--validate-sites` validates `sites-enabled/`.
 
-### Phase 2: Native ACME Engine (DNS-01 & TLS-ALPN-01)
+### Stage 2: Native ACME Engine (DNS-01 & TLS-ALPN-01)
 - **Tasks**: Cloudflare DNS API client, `acme-tls/1` challenge responder, multi-SAN order manager, partition fallback.
 - **Parallel Tests**:
   - Mock ACME server / staging test: issuance of multi-SAN certificate.
@@ -223,7 +226,7 @@ Each phase includes parallel unit/integration tests with explicit Definition of 
   - Permission test: verify private keys are created with `0600` permissions.
 - **DoD**: Certificate issuance succeeds on Let's Encrypt Staging; certs stored and reloadable.
 
-### Phase 3: L7 Reverse Proxy & Static Server
+### Stage 3: L7 Reverse Proxy & Static Server
 - **Tasks**: Hyper v1 integration, WebSocket upgrade tunnel, static file handler with `try_files`.
 - **Parallel Tests**:
   - Integration test: HTTP/1.1 and H2 upstream request forwarding with `X-Forwarded-*` headers.
@@ -231,10 +234,10 @@ Each phase includes parallel unit/integration tests with explicit Definition of 
   - Static file test: MIME guessing, path traversal rejection (`/../etc/passwd` $\to$ 403/404).
 - **DoD**: End-to-end HTTP requests and WebSockets work across TLS termination.
 
-### Phase 4: Hybrid Integration & Hot Reload
+### Stage 4: Hybrid Integration & Hot Reload
 - **Tasks**: Update `src/sni.rs` for ALPN; integrate L7 routing into `relay.rs`; SIGHUP and `notify` debounce.
 - **Parallel Tests**:
-  - SNI/ALPN test: `acme-tls/1` routes to challenge; `xray` routes to L4; `site` routes to L7; unknown routes to Caddy.
+  - SNI/ALPN test: `acme-tls/1` routes to challenge; `xray` routes to L4; `site` routes to L7; unknown routes to configured `default_backend`.
   - Hot reload test: modifying a site config applies changes without dropping existing TCP connections.
   - Invalid config reload test: corrupted site file is rejected, previous config remains active.
 - **DoD**: Complete end-to-end test matrix passes; clean rollback verified.
