@@ -167,7 +167,8 @@ pub async fn forward_request(
         let resp = sender.send_request(req).await?;
 
         if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
-            let upstream_upgrade = hyper::upgrade::on(resp);
+            let (mut parts, _) = resp.into_parts();
+            let upstream_upgrade = hyper::upgrade::on(Response::from_parts(parts.clone(), ()));
             tokio::spawn(async move {
                 match (on_upgrade.await, upstream_upgrade.await) {
                     (Ok(downstream), Ok(upstream)) => {
@@ -180,12 +181,11 @@ pub async fn forward_request(
                 }
             });
 
-            return Ok(Response::builder()
-                .status(StatusCode::SWITCHING_PROTOCOLS)
-                .header(header::UPGRADE, "websocket")
-                .header(header::CONNECTION, "Upgrade")
-                .body(crate::l7::empty_box())
-                .unwrap());
+            // Ensure standard upgrade headers are present in downstream response
+            parts.headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+            parts.headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+
+            return Ok(Response::from_parts(parts, crate::l7::empty_box()));
         }
 
         let (parts, body) = resp.into_parts();
