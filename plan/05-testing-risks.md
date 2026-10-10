@@ -33,8 +33,8 @@ ss -s ; journalctl -u penik-proxy -p err
 - **Caddy xcaddy + PROXY protocol**: директива `proxy_protocol` требует сборки Caddy с плагином `github.com/caddyserver/proxy-protocol`. При настройке только `servers :8444 { listener_wrappers { proxy_protocol ... tls } }`, `:80` — чистый.
 - **Производительность**: один `accept` + `spawn`, весь хот-пат — `copy_bidirectional`. `splice` осознанно вне MVP. Ботлнек — `LimitNOFILE` и `net.core.somaxconn`.
 
-## Что НЕ в MVP
-- SIGHUP hot-reload конфига (только restart).
-- Prometheus `/metrics` (ты выбрал «лог по флагу», метрики не делаем).
+## Что НЕ в MVP (Фаза 1)
+- SIGHUP hot-reload конфига (только restart; запланирован на Фазу 2).
+- Prometheus `/metrics` (выбран «лог по флагу», метрики не делаем).
 - UDP/QUIC (HTTP/3 на 443/udp — отдельный вопрос, Caddy/Xray сами; TCP-прокси его не трогает).
-- Терминация TLS / сертификаты в Rust — не нужны по дизайну.
+- Терминация TLS / сертификаты в Rust — вынесены в Фазу 2 (`06-reverse-proxy-auto-ssl.md`). В Фазе 1 сохраняется чистый L4 peek + splice.

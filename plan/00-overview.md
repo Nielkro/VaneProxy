@@ -20,5 +20,8 @@ TLS **не терминируется** в Rust — только peek + `copy_bi
 - `03-implementation.md` — структура Rust-проекта, шаги, зависимости
 - `04-deploy.md` — systemd, Caddy, Xray, права на :443
 - `05-testing-risks.md` — тесты, риски, крайние случаи
+- `06-reverse-proxy-auto-ssl.md` — Phase 2: эволюция в гибридный L4/L7 Reverse Proxy с авто-SSL и поддержкой Caddyfile
 
-Статус: план, кода пока нет.
+## Этапы развития
+1. **Фаза 1 (Базовый MVP — документы 00–05):** Чистый L4 SNI-роутер на порту :443 без терминации TLS (`copy_bidirectional`). Защищённый проброс в Xray и Caddy (с PROXY protocol v2).
+2. **Фаза 2 (Расширение до Reverse Proxy — документ 06):** Добавление L7-движка, поддержка синтаксиса Caddyfile (`sites-enabled/`), единый консолидированный SAN-сертификат через встроенный ACME (DNS-01 Cloudflare / TLS-ALPN-01) и hot-reload. Вся L4-функциональность сохраняется как приоритет №1.

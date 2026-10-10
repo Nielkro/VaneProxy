@@ -1,118 +1,117 @@
-# Hybrid Reverse Proxy & Auto-SSL Architecture Plan
+# Hybrid Reverse Proxy & Auto-SSL Architecture Plan (Phase 2)
 
-## 1. Executive Summary
+## 1. Context, Goal & Evolutionary Strategy
 
-PenikProxy evolves from a lightweight Layer-4 SNI multiplexer into a full-featured hybrid reverse proxy with native Caddyfile syntax support and built-in Auto-SSL (ACME v2 with DNS-01 and TLS-ALPN-01 challenges).
+### 1.1 Context within Project Roadmap
+- **Phase 1 (MVP, documents 00–05)**: Implements the baseline L4 SNI router on `:443` without TLS termination. Slices raw TCP streams between Xray and an external Caddy instance (`default_backend`) with PROXY protocol v2.
+- **Phase 2 (This document)**: Evolves PenikProxy into a hybrid L4/L7 reverse proxy with native Caddyfile parsing, embedded Auto-SSL (ACME v2 via DNS-01 and TLS-ALPN-01), static file serving, and zero-downtime hot reloading.
 
-Key differentiators:
-- **Zero External Dependencies**: Operates as a single standalone Rust binary. No external runtime tools (`certbot`, `acme.sh`, Python) required.
-- **Unified Multi-SAN Certificate Optimization**: Aggregates all domains and wildcard clusters from all configured sites into a **single consolidated certificate** (up to 100 SANs per Let's Encrypt specifications), eliminating multiple ACME orders and avoiding rate limits.
-- **Hybrid L4 / L7 Coexistence**: Preserves high-performance raw TCP pass-through (e.g. for Xray / VLESS Reality) while terminating TLS and proxying HTTP/WebSocket or serving static files for configured web sites.
-- **Caddyfile Compatibility**: Native parsing of standard Caddyfile site definitions in `sites-enabled/`.
-- **Zero-Downtime Hot Reload**: Automatic file watching on `sites-enabled/` and `SIGHUP` support.
+### 1.2 Coexistence, Migration & Rollback Strategy
+- **Coexistence**: The existing `default_backend` (e.g., Caddy on `127.0.0.1:8444`) is **retained**. It acts as the catch-all fallback and migration bridge.
+- **Gradual Migration**: Sites can be migrated one-by-one from the external Caddy into PenikProxy's `sites-enabled/`. If a site is not found in `sites-enabled/`, traffic seamlessly falls back to `default_backend`.
+- **Zero Overhead Toggle**: If `sites_dir` is not configured in `config.toml`, PenikProxy operates strictly in Phase 1 pure L4 mode with zero L7 runtime overhead.
+- **Rollback Safety**: If any migrated site experiences issues, removing or renaming its `.caddy` file triggers a hot-reload that immediately routes that domain's SNI back to `default_backend = "caddy"` via L4 pass-through.
 
 ---
 
-## 2. Routing Hierarchy & Traffic Flow
+## 2. Traffic Flow & Connection Pipeline
 
-Every incoming connection on `:443` undergoes SNI inspection:
+Every incoming connection on `:443` is processed through a deterministic decision tree:
 
 ```mermaid
 flowchart TD
-    A["Incoming TCP connection on :443"] --> B["Peek ClientHello: extract SNI & ALPN"]
+    A["Incoming TCP connection on :443"] --> B["Peek ClientHello: parse SNI (0x0000) & ALPN (0x0010)"]
     B --> C{"Is ALPN == acme-tls/1 ?"}
-    C -- Yes --> D["ACME TLS-ALPN-01 Challenge Handler (RFC 8737)"]
+    C -- Yes --> D["ACME TLS-ALPN-01 Challenge Handler<br/>Serve in-memory challenge cert (RFC 8737)"]
     C -- No --> E{"Matches L4 Passthrough in config.toml [[routes]]?"}
     E -- Yes --> F["L4 TCP Splice to Backend (e.g. Xray)<br/>No TLS termination, optional PROXY v2"]
     E -- No --> G{"Matches L7 Site in sites-enabled/*.caddy?"}
-    G -- Yes --> H["Terminate TLS with Unified Certificate<br/>Route via L7 Engine: Reverse Proxy / Static Files"]
+    G -- Yes --> H["Terminate TLS with Unified / Cached Certificate<br/>Process request via Hyper L7 Engine"]
     G -- No --> I["L4 TCP Splice to default_backend (e.g. Caddy)<br/>Preserves PROXY protocol v2"]
 ```
 
-### Precedence Order
-1. **ACME ALPN Probe**: Handled immediately if `acme-tls/1` is requested during an active certificate order.
-2. **L4 Passthrough (`config.toml`)**: If the SNI matches a route in `[[routes]]` (e.g., `studio.iuharin.ru -> xray`), connection is spliced directly at TCP level without decrypting.
-3. **L7 Sites (`sites-enabled/*.caddy`)**: If the SNI matches a configured site or wildcard, PenikProxy terminates TLS using the in-memory certificate and processes the HTTP/1.1 or HTTP/2 request.
-4. **Fallback (`default_backend`)**: If no rule matches, routes to `default_backend` (with optional PROXY protocol v2).
+### Protocol Parser Updates (`src/sni.rs`)
+The current `src/sni.rs` only extracts extension `0x0000` (SNI). In Phase 2, `src/sni.rs` is expanded to:
+1. Parse TLS extension `0x0000` (`server_name`).
+2. Parse TLS extension `0x0010` (`application_layer_protocol_negotiation` — ALPN).
+3. If ALPN list contains `acme-tls/1`, flag connection for the ACME challenge handler before any routing decisions.
+
+### Optional HTTP Port 80 Listener
+While Port 80 is **not** required for SSL issuance (due to DNS-01 and TLS-ALPN-01), PenikProxy supports an optional global configuration:
+```toml
+http_listen = "0.0.0.0:80" # optional, disabled by default
+```
+When enabled, all requests on `:80` receive an immediate `301 Moved Permanently` redirect to `https://{host}{uri}`.
 
 ---
 
 ## 3. Unified Auto-SSL Engine
 
 ### 3.1 Consolidated Multi-Domain SAN Strategy
-Instead of issuing individual certificates for each site or subdomain (which triggers Let's Encrypt rate limits and multiplies renewal overhead):
-1. PenikProxy scans all sites in `sites-enabled/` on startup and reload.
-2. Extracts all fully-qualified domain names (FQDNs), e.g., `ad1.slavchat.ru`, `ad2.slavchat.ru`, `slavchat.ru`, `ad1.penik.ru`.
-3. Derives base/apex domains and wildcard entries:
-   - `slavchat.ru` + `*.slavchat.ru`
-   - `penik.ru` + `*.penik.ru`
-4. Requests **one unified certificate** containing all base domains and wildcards in its Subject Alternative Name (SAN) list.
-5. **Instant Subdomain Availability**: Any future subdomain added under an existing apex wildcard works immediately with zero certificate issuance delay.
+Let's Encrypt permits up to **100 Subject Alternative Names (SANs)** per single certificate (per Let's Encrypt Certificate Limits specification).
 
-### 3.2 ACME Validation Methods
-- **DNS-01 (Wildcard & Apex)**:
-  - Communicates directly with Cloudflare DNS API (RFC 8555 + Cloudflare REST API).
-  - Credentials configured globally in `config.toml` (`cloudflare_token` or `cloudflare_credentials = "/etc/penik/cloudflare.ini"`).
-  - Automatically provisions `_acme-challenge` TXT records, polls propagation, completes order, and deletes temporary TXT records.
-- **TLS-ALPN-01 (RFC 8737)**:
-  - For non-wildcard domains without Cloudflare DNS credentials.
-  - Validates entirely over port 443 during TLS handshake using the `acme-tls/1` protocol extension.
-  - Requires no port 80 and no DNS credentials.
-- **Manual / External Fallback**:
-  - Supports explicit certificate paths (`tls /path/to/cert.pem /path/to/key.pem`) or shell commands (`tls cmd "..."`).
+1. **Domain Extraction**: On startup and reload, PenikProxy scans all sites in `sites-enabled/`.
+2. **Clustering**: For each site, extracts the fully-qualified domain name (FQDN), groups by apex domain (e.g., `slavchat.ru`, `penik.ru`), and generates wildcard pairs:
+   - Group 1: `slavchat.ru` and `*.slavchat.ru`
+   - Group 2: `penik.ru` and `*.penik.ru`
+3. **Consolidation**: Consolidates all groups into **one unified multi-SAN certificate order** if total SAN count $\le 100$.
+4. **Instant Subdomains**: Any new subdomain added in `sites-enabled/` matching an existing wildcard is immediately valid without requesting a new certificate.
 
-### 3.3 Storage & Renewal Lifecycle
-- Certificate and private key stored under `storage_dir` (e.g., `/var/lib/penik-proxy/certs/unified.pem` and `unified.key`).
-- In-memory hot-swapping via `ArcSwap<rustls::ServerConfig>`.
-- Background renewal worker executes daily, initiating ACME re-issuance when certificate expiration is within 30 days.
+### 3.2 Challenge Selection per Identifier
+Within a multi-SAN ACME order (RFC 8555), Let's Encrypt generates one authorization object per identifier:
+- **Wildcard identifiers (`*.domain.com`)**: **Must** be solved via `DNS-01`. PenikProxy uses Cloudflare API to provision `_acme-challenge` TXT records.
+- **Apex/Single identifiers (`domain.com`)**: Solved via `DNS-01` if Cloudflare credentials are configured; otherwise solved via `TLS-ALPN-01` on `:443`.
+
+### 3.3 Blast Radius & Fault Partitioning
+*Risk*: In a single multi-SAN order, if one domain fails verification (e.g. DNS propagation timeout or misconfigured zone), Let's Encrypt fails the entire order.
+*Mitigation*:
+- **Pre-flight DNS Check**: Before submitting the ACME challenge response, PenikProxy verifies TXT propagation locally against public DNS resolvers (`1.1.1.1`, `8.8.8.8`).
+- **Partitioning Fallback**: If a consolidated order fails authorization, the engine automatically partitions the order into **per-apex certificates** (`slavchat.ru` + `*.slavchat.ru` as Order A, `penik.ru` + `*.penik.ru` as Order B). A failure in one apex domain does not block issuance for other domains.
+
+### 3.4 ACME Provider, Staging & Security
+- **Cloudflare Limitation**: DNS-01 automation currently requires domains to be managed on Cloudflare. This limitation is explicitly documented.
+- **Let's Encrypt Staging**: Configurable via `[tls] staging = true`, switching directory URL to `https://acme-staging-v02.api.letsencrypt.org/directory` to test without consuming production rate limits.
+- **Key Persistence & Permissions**: ACME account keys and private keys are saved under `storage_dir` with Unix file permissions strictly set to `0600` (read/write only by the proxy owner).
+- **OCSP Stapling**: Deferred to post-Phase 2 to maintain implementation focus.
 
 ---
 
-## 4. Configuration Model
+## 4. Supported Caddyfile Subset & Semantics
 
-### 4.1 Global Configuration (`/etc/penik-proxy/config.toml`)
-```toml
-listen = ["0.0.0.0:443", "[::]:443"]
-strict_listen = true
-sites_dir = "/etc/penik-proxy/sites-enabled"
+PenikProxy implements a strict, predictable subset of Caddyfile directives.
 
-[tls]
-email = "admin@slavchat.ru"
-storage_dir = "/var/lib/penik-proxy/certs"
-cloudflare_credentials = "/etc/penik/cloudflare.ini"
-# cloudflare_token = "..." # alternative direct token
-renew_days_before = 30
+### 4.1 Strict Fail-Fast Policy
+To prevent silent misconfigurations, **any unknown directive, unclosed block, or invalid argument causes configuration validation to fail fast** with the exact filename, line, and column reported. The server will refuse to start or refuse to apply the reload.
 
-# L4 Passthrough routes (unchanged format)
-[[routes]]
-sni = "studio.iuharin.ru"
-backend = "xray"
+### 4.2 Supported Directives Matrix
 
-[backends.xray]
-addr = "127.0.0.1:8443"
-send_proxy_protocol = false
+| Directive | Syntax | Semantics |
+| :--- | :--- | :--- |
+| `reverse_proxy` | `reverse_proxy <upstreams...>` | Proxies HTTP requests to TCP (`127.0.0.1:3000`) or Unix socket (`unix//run/app.sock` and `unix:///run/app.sock`). Automatic HTTP/1.1 and H2 upstream pooling. Automatic WebSocket upgrade tunneling. Injects `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Real-IP`, `Host`. |
+| `root` | `root * <path>` | Sets the document root path for static files. |
+| `file_server` | `file_server [browse]` | Serves static assets from `root`. Streams file with chunked/content-length encoding, determines MIME via `mime_guess`. Returns `404` if not found. |
+| `try_files` | `try_files <files...> <fallback>` | Checks file existence sequentially; rewrites request path to the first match or falls back to a named matcher / route. |
+| `handle` | `handle [<matcher>] { ... }` | Mutually exclusive routing block. |
+| `redir` | `redir [<matcher>] <target> [code]` | Issues HTTP redirect (default `302`, or `301`, `307`, `308`). |
+| `rewrite` | `rewrite [<matcher>] <target>` | Internal URL path rewrite. |
+| `header_up` | `header_up [+|-]<name> [value]` | Modifies upstream request headers. |
+| `header_down`| `header_down [+|-]<name> [value]` | Modifies downstream response headers. |
 
-default_backend = "caddy"
-[backends.caddy]
-addr = "127.0.0.1:8444"
-send_proxy_protocol = true
-```
+### 4.3 Semantic Examples
 
-### 4.2 Site Configurations (`/etc/penik-proxy/sites-enabled/*.caddy`)
-Standard Caddyfile format with no mandatory TLS blocks:
-
-#### Example 1: Reverse Proxy with Auto-WebSockets (`sites-enabled/chat.caddy`)
+#### Example 1: Reverse Proxy with Unix Socket & TCP Upstreams
 ```caddyfile
 ad1.slavchat.ru {
     reverse_proxy 127.0.0.1:3001
 }
 
 ad2.slavchat.ru {
-    reverse_proxy unix:///run/chat/ad2.sock
+    # Supports both Caddy unix// and URI unix:/// format
+    reverse_proxy unix//run/chat/ad2.sock
 }
 ```
 
-#### Example 2: Static File Serving (`sites-enabled/main.caddy`)
+#### Example 2: Static File Server
 ```caddyfile
 slavchat.ru {
     root * /var/www/slavchat
@@ -120,107 +119,122 @@ slavchat.ru {
 }
 ```
 
-#### Example 3: Mixed Static + Proxy Fallback (`sites-enabled/portal.caddy`)
+#### Example 3: Static Files with Reverse Proxy Fallback (SPA / API)
+In Caddy semantics, `file_server` alone emits 404 for missing files. To properly fall back to a proxy, PenikProxy uses `handle` or `try_files`:
 ```caddyfile
 penik.ru {
     root * /var/www/penik
-    file_server
-    reverse_proxy 127.0.0.1:8080
+
+    # Route requests matching static files to file_server; everything else to backend
+    @static file
+    handle @static {
+        file_server
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8080
+    }
 }
 ```
 
 ---
 
-## 5. L7 HTTP Engine Details
+## 5. Hot Reload & Concurrency Architecture
 
-- **HTTP Protocols**: HTTP/1.1 and HTTP/2 (ALPN `h2`, `http/1.1`).
-- **Proxy Headers**: Automatically appends and standardizes:
-  - `X-Forwarded-For` (appends client IP)
-  - `X-Forwarded-Proto` (`https`)
-  - `X-Forwarded-Host` (requested Host)
-  - `X-Real-IP` (direct remote IP)
-  - `Host` (preserved or normalized)
-- **WebSockets**: Detects `Upgrade: websocket` and `Connection: Upgrade`, completes 101 Switching Protocols response, and performs bidirectional byte streaming between client and backend.
-- **Static File Serving**:
-  - Resolves sanitized relative path against `root`.
-  - Determines MIME type using `mime_guess`.
-  - Supports `GET` and `HEAD` methods, returns `404 Not Found` or `403 Forbidden` if path is outside root.
+### 5.1 Atomic Swapping
+Configuration and active certificates are managed behind an `ArcSwap<RuntimeConfig>`:
+- When a reload is triggered, PenikProxy compiles the new draft configuration in isolation (parses Caddyfiles, verifies syntax, checks upstream socket permissions).
+- **If validation fails**: An error is logged with line numbers; the active configuration remains 100% active. Existing and incoming connections suffer zero interruption.
+- **If validation succeeds**: The active pointer is swapped atomically using `ArcSwap::store`. Active in-flight requests finish on their existing snapshot; new connections immediately use the updated configuration.
+
+### 5.2 Triggers & Debounce
+1. **SIGHUP Handler**: Unix signal triggers immediate reload and logs outcome.
+2. **Filesystem Watcher (`notify`)**: Monitors `config.toml` and `sites-enabled/`. Includes a **500ms debounce buffer** to coalesce burst write/rename/flush events from text editors into a single reload pass.
 
 ---
 
-## 6. Rust Implementation Architecture
+## 6. Rust Crates & Module Architecture
 
-### 6.1 Crate Dependencies
+### 6.1 Verified Dependencies
 ```toml
+[dependencies]
 # TLS & Crypto
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pki-types = "1"
-rcgen = "0.13"
+rcgen = "0.14"
 
-# HTTP Engine
+# HTTP & Networking
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 mime_guess = "2"
 
-# ACME & Network
-instant-acme = "0.7"
+# ACME & REST
+instant-acme = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
-# Concurrency & Hot Reload
+# State, Reload & Watching
 arc-swap = "1"
 notify = "6"
 ```
 
-### 6.2 Module Layout
+### 6.2 Module Breakdown
 - `src/caddyfile/`:
-  - `lexer.rs`: Tokenizes Caddyfile syntax (blocks, directives, arguments).
-  - `parser.rs`: Builds abstract configuration representation (`SiteConfig`, `Directive`).
-  - `matcher.rs`: Domain & wildcard matching logic (`*.domain.com`).
+  - `lexer.rs`: Tokenizer with exact line/column tracking.
+  - `parser.rs`: AST parser enforcing the supported directive subset and fail-fast validation.
+  - `matcher.rs`: Path, extension, and wildcard host matching.
 - `src/acme/`:
-  - `client.rs`: ACME v2 RFC 8555 communication with Let's Encrypt / ZeroSSL.
-  - `dns_cloudflare.rs`: Cloudflare API client for TXT record creation and deletion.
-  - `alpn_challenge.rs`: In-memory certificate generation for `acme-tls/1` verification.
-  - `cluster.rs`: Domain extractor that clusters all sites into root domains + wildcards for the unified multi-SAN certificate.
-  - `store.rs`: Reads and writes certificate chains and private keys to disk.
+  - `client.rs`: RFC 8555 client wrapping `instant-acme`.
+  - `dns_cloudflare.rs`: REST client for Cloudflare DNS record management.
+  - `alpn_challenge.rs`: Ephemeral self-signed certificate generator for `acme-tls/1`.
+  - `cluster.rs`: Apex domain clustering and multi-SAN consolidation logic.
+  - `store.rs`: Disk persistence with `0600` key permissions.
 - `src/l7/`:
-  - `server.rs`: Accepts decrypted TLS streams and binds Hyper HTTP/1.1 + H2 service.
-  - `proxy.rs`: Hyper client for upstream reverse proxying, connection reuse, and WebSocket tunneling.
-  - `static_files.rs`: Static asset streaming with MIME resolution.
+  - `service.rs`: Hyper service dispatcher handling `handle`, `try_files`, `redir`.
+  - `proxy.rs`: Reverse proxy upstream forwarder with WebSocket upgrade support.
+  - `static_files.rs`: Static asset streaming with MIME guessing.
 - `src/tls/`:
-  - `resolver.rs`: Custom `rustls::server::ResolvesServerCert` implementation with hot-reloading support.
+  - `resolver.rs`: Custom `rustls::server::ResolvesServerCert` matching SNI against in-memory certs.
 - `src/watcher.rs`:
-  - Listens for `SIGHUP` and monitors `sites-enabled/` and `config.toml` changes using `notify`.
-- `src/relay.rs`:
-  - Updates routing logic to branch between L4 passthrough, L7 TLS termination, and default backend.
+  - SIGHUP and 500ms debounced filesystem watcher.
+- `src/sni.rs`:
+  - Extended to parse both SNI (0x0000) and ALPN (0x0010).
 
 ---
 
-## 7. Implementation Roadmap
+## 7. Phased Implementation Roadmap & Test Plan
 
-### Phase 1: Caddyfile Parser & Configuration Pipeline
-- Implement Caddyfile lexer & AST parser (`sites-enabled/*.caddy`).
-- Support `reverse_proxy`, `root`, `file_server`, and basic block directives.
-- Implement domain clustering logic to generate unified SAN list.
+Each phase includes parallel unit/integration tests with explicit Definition of Done (DoD).
+
+### Phase 1: Caddyfile Parser & Domain Clustering
+- **Tasks**: Implement `lexer.rs`, `parser.rs`, and `cluster.rs`.
+- **Parallel Tests**:
+  - Unit tests for tokenizer (comments, quoted strings, block nesting).
+  - Validation test: unknown directive fails with exact line number.
+  - Clustering test: `[ad1.slavchat.ru, ad2.slavchat.ru, slavchat.ru, ad1.penik.ru]` correctly clusters into `[slavchat.ru, *.slavchat.ru, penik.ru, *.penik.ru]`.
+- **DoD**: All unit tests pass; CLI command `--validate-sites` validates `sites-enabled/`.
 
 ### Phase 2: Native ACME Engine (DNS-01 & TLS-ALPN-01)
-- Implement Cloudflare DNS-01 API client (TXT record create, poll, delete).
-- Implement TLS-ALPN-01 challenge generator (`acme-tls/1`).
-- Implement ACME order manager to request and save the unified multi-SAN certificate.
-- Implement background renewal scheduler.
+- **Tasks**: Cloudflare DNS API client, `acme-tls/1` challenge responder, multi-SAN order manager, partition fallback.
+- **Parallel Tests**:
+  - Mock ACME server / staging test: issuance of multi-SAN certificate.
+  - Fallback test: simulated failure of 1 apex domain causes partition into separate orders.
+  - Permission test: verify private keys are created with `0600` permissions.
+- **DoD**: Certificate issuance succeeds on Let's Encrypt Staging; certs stored and reloadable.
 
-### Phase 3: L7 HTTP Reverse Proxy & Static Server
-- Integrate `tokio-rustls` with dynamic certificate resolver.
-- Implement Hyper v1 reverse proxy with automatic header injection and WebSocket upgrade tunneling.
-- Implement static file server handler.
+### Phase 3: L7 Reverse Proxy & Static Server
+- **Tasks**: Hyper v1 integration, WebSocket upgrade tunnel, static file handler with `try_files`.
+- **Parallel Tests**:
+  - Integration test: HTTP/1.1 and H2 upstream request forwarding with `X-Forwarded-*` headers.
+  - WebSocket echo test: bi-directional upgrade streams cleanly without drop.
+  - Static file test: MIME guessing, path traversal rejection (`/../etc/passwd` $\to$ 403/404).
+- **DoD**: End-to-end HTTP requests and WebSockets work across TLS termination.
 
 ### Phase 4: Hybrid Integration & Hot Reload
-- Update `relay.rs` to dispatch connections to the L7 engine when SNI matches an L7 site.
-- Implement SIGHUP listener and `notify` filesystem watcher.
-- Validate zero-downtime reconfiguration.
-
-### Phase 5: Verification & Documentation
-- Comprehensive test suite covering Caddyfile parsing, wildcard resolution, WebSocket proxying, and SNI routing.
-- Update `PROJECT_MAP.md` and user documentation.
+- **Tasks**: Update `src/sni.rs` for ALPN; integrate L7 routing into `relay.rs`; SIGHUP and `notify` debounce.
+- **Parallel Tests**:
+  - SNI/ALPN test: `acme-tls/1` routes to challenge; `xray` routes to L4; `site` routes to L7; unknown routes to Caddy.
+  - Hot reload test: modifying a site config applies changes without dropping existing TCP connections.
+  - Invalid config reload test: corrupted site file is rejected, previous config remains active.
+- **DoD**: Complete end-to-end test matrix passes; clean rollback verified.
