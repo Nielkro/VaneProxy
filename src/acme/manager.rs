@@ -136,7 +136,19 @@ impl AcmeManager {
             return Ok(());
         }
 
-        let sans = consolidate_sans(site_domains);
+        let sans = if self.cf_dns.is_some() {
+            consolidate_sans(site_domains)
+        } else {
+            // Wildcard certificates cannot be validated via TLS-ALPN-01; use exact domains
+            let mut set = std::collections::BTreeSet::new();
+            for d in site_domains {
+                let trimmed = d.trim().to_lowercase();
+                if !trimmed.is_empty() && !trimmed.starts_with("*.") {
+                    set.insert(trimmed);
+                }
+            }
+            set.into_iter().collect()
+        };
         info!(sans = ?sans, "consolidated SANs for ACME order");
 
         // Attempt single unified order first

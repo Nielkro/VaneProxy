@@ -212,7 +212,23 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     if is_alpn {
         if let Some(sni_name) = sni.as_deref() {
             if state.alpn_registry.get_challenge(sni_name).is_some() {
-                debug!(sni = %sni_name, "received ACME TLS-ALPN-01 probe");
+                debug!(sni = %sni_name, "handling ACME TLS-ALPN-01 probe");
+                if let Some(acceptor) = state.tls_acceptor.load().as_ref() {
+                    let prefixed = PrefixedStream::new(buf, inbound);
+                    let acceptor = acceptor.clone();
+                    let sni_owned = sni_name.to_string();
+                    tokio::spawn(async move {
+                        match acceptor.accept(prefixed).await {
+                            Ok(mut stream) => {
+                                let _ = stream.shutdown().await;
+                            }
+                            Err(e) => {
+                                warn!(sni = %sni_owned, error = %e, "TLS-ALPN-01 handshake failed");
+                            }
+                        }
+                    });
+                    return;
+                }
             }
         }
     }

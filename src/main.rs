@@ -49,6 +49,9 @@ async fn main() {
         }
     };
 
+    // Install process-wide default CryptoProvider for Rustls (ring)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     logging::init(&cfg.log_level, cfg.access_log);
 
     // Load initial sites from sites_dir if configured
@@ -86,18 +89,25 @@ async fn main() {
 
         if let Some(store) = store {
             // Load existing certificates if present
-            if store.has_certificate() {
+            let initial_certified_key = if store.has_certificate() {
                 if let (Ok(cert_pem), Ok(key_pem)) =
                     (store.load_certificate(), store.load_private_key())
                 {
-                    if let Ok(certified_key) = tls::parse_certified_key(&cert_pem, &key_pem) {
-                        let resolver = Arc::new(tls::DynamicCertResolver::new(Some(certified_key)));
-                        if let Ok(server_config) = tls::create_server_config(resolver.clone()) {
-                            tls_acceptor = Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)));
-                            cert_resolver = Some(resolver);
-                        }
-                    }
+                    tls::parse_certified_key(&cert_pem, &key_pem).ok()
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+
+            let resolver = Arc::new(tls::DynamicCertResolver::with_alpn_registry(
+                initial_certified_key,
+                alpn_registry.clone(),
+            ));
+            if let Ok(server_config) = tls::create_server_config(resolver.clone()) {
+                tls_acceptor = Some(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)));
+                cert_resolver = Some(resolver);
             }
 
             // Setup ACME manager if email is configured
