@@ -167,6 +167,7 @@ async fn main() {
         args.config.clone(),
         cfg.sites_dir.clone(),
         acme_mgr,
+        cert_resolver,
     );
 
     // Optional HTTP redirect listener

@@ -1,0 +1,42 @@
+# Production config for penik-proxy: /etc/penik-proxy/config.toml
+
+listen = ["0.0.0.0:443", "[::]:443"]
+strict_listen = true
+
+client_hello_timeout_ms = 5000
+backend_connect_timeout_ms = 3000
+max_client_hello_bytes = 16389
+
+log_level = "error"
+access_log = false
+
+# Directory with Caddyfile sites (*.caddy, *.conf)
+sites_dir = "/etc/penik-proxy/sites-enabled"
+
+# Automatic HTTP -> HTTPS redirect on port 80
+http_listen = "0.0.0.0:80"
+
+[tls]
+email = "admin@slavchat.ru"
+storage_dir = "/var/lib/penik-proxy/certs"
+cloudflare_credentials = "/etc/penik/cloudflare.ini"
+staging = false
+
+default_backend = "caddy"
+
+# L4 Passthrough routes (Xray / Reality - raw TCP without TLS termination)
+[[routes]]
+sni = "reality.slavchat.ru"
+backend = "xray"
+
+[[routes]]
+sni = "reality.penik.ru"
+backend = "xray"
+
+[backends.xray]
+addr = "127.0.0.1:8443"
+send_proxy_protocol = false
+
+[backends.caddy]
+addr = "127.0.0.1:8444"
+send_proxy_protocol = true

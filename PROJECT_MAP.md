@@ -33,6 +33,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `penik-proxy.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `penik` user.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
+- `config.production.toml` — Production configuration template with strict security, DNS-01/ALPN, and L4/L7 routing.
 
 ## Docs
 

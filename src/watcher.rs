@@ -18,6 +18,7 @@ pub fn spawn_reload_watcher(
     config_path: PathBuf,
     sites_dir: Option<PathBuf>,
     acme_mgr: Option<Arc<AcmeManager>>,
+    cert_resolver: Option<Arc<crate::tls::DynamicCertResolver>>,
 ) {
     tokio::spawn(async move {
         let (tx, mut rx) = mpsc::channel(16);
@@ -70,11 +71,11 @@ pub fn spawn_reload_watcher(
                     // Debounce: wait 500ms to coalesce burst events from editors
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     while rx.try_recv().is_ok() {}
-                    reload_all(&state, &config_path, &sites_dir, &acme_mgr).await;
+                    reload_all(&state, &config_path, &sites_dir, &acme_mgr, &cert_resolver).await;
                 }
                 _ = renewal_interval.tick() => {
                     info!("running scheduled 12-hour certificate renewal check...");
-                    if let Some(mgr) = &acme_mgr {
+                    if let (Some(mgr), Some(resolver)) = (&acme_mgr, &cert_resolver) {
                         let sites = state.sites();
                         let mut domains = Vec::new();
                         for s in sites.iter() {
@@ -82,8 +83,19 @@ pub fn spawn_reload_watcher(
                         }
                         if !domains.is_empty() {
                             let mgr_task = Arc::clone(mgr);
+                            let resolver_clone = Arc::clone(resolver);
+                            let domains_clone = domains.clone();
                             tokio::spawn(async move {
-                                let _ = mgr_task.ensure_certificates(&domains).await;
+                                if let Ok(()) = mgr_task.ensure_certificates(&domains).await {
+                                    if let Ok(all_certs) = mgr_task.store().load_all_certificates() {
+                                        for (cert_pem, key_pem) in all_certs {
+                                            if let Ok(ck) = crate::tls::parse_certified_key(&cert_pem, &key_pem) {
+                                                resolver_clone.register_certified_key(&domains_clone, ck.clone());
+                                                resolver_clone.set_certified_key(ck);
+                                            }
+                                        }
+                                    }
+                                }
                             });
                         }
                     }
@@ -97,7 +109,7 @@ pub fn spawn_reload_watcher(
                     std::future::pending::<()>().await;
                 } => {
                     info!("received SIGHUP signal, triggering reload");
-                    reload_all(&state, &config_path, &sites_dir, &acme_mgr).await;
+                    reload_all(&state, &config_path, &sites_dir, &acme_mgr, &cert_resolver).await;
                 }
             }
         }
@@ -109,6 +121,7 @@ async fn reload_all(
     config_path: &Path,
     sites_dir: &Option<PathBuf>,
     acme_mgr: &Option<Arc<AcmeManager>>,
+    cert_resolver: &Option<Arc<crate::tls::DynamicCertResolver>>,
 ) {
     info!("compiling draft configuration for atomic reload...");
 
@@ -144,16 +157,27 @@ async fn reload_all(
         "configuration atomically reloaded without downtime"
     );
 
-    // 4. Update certificates if new domains exist
-    if let Some(mgr) = acme_mgr {
+    // 4. Update certificates and dynamic resolver if new domains exist
+    if let (Some(mgr), Some(resolver)) = (acme_mgr, cert_resolver) {
         let mut domains = Vec::new();
         for site in new_sites.iter() {
             domains.extend(site.addresses.clone());
         }
         if !domains.is_empty() {
             let mgr_clone = Arc::clone(mgr);
+            let resolver_clone = Arc::clone(resolver);
+            let domains_clone = domains.clone();
             tokio::spawn(async move {
-                let _ = mgr_clone.ensure_certificates(&domains).await;
+                if let Ok(()) = mgr_clone.ensure_certificates(&domains).await {
+                    if let Ok(all_certs) = mgr_clone.store().load_all_certificates() {
+                        for (cert_pem, key_pem) in all_certs {
+                            if let Ok(ck) = crate::tls::parse_certified_key(&cert_pem, &key_pem) {
+                                resolver_clone.register_certified_key(&domains_clone, ck.clone());
+                                resolver_clone.set_certified_key(ck);
+                            }
+                        }
+                    }
+                }
             });
         }
     }

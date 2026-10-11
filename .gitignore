@@ -1,2 +1,10 @@
 target/
 *.log
+certs/
+*.pem
+account.json
+cloudflare.ini
+penik.toml
+sites-enabled/
+test_*.py
+/tmp/penik*
