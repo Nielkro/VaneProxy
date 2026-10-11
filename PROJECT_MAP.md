@@ -32,6 +32,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `Cargo.toml` — Package manifest: `vane` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `vane.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `vane` user.
+- `assets/vane-logo.svg` — Aerodynamic neon SVG vector logo for Vane.
 - `README.md` — Project documentation, architecture diagrams, and quickstart guide.
 - `LICENSE` — MIT open-source license.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.

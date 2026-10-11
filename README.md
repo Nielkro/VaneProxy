@@ -1,9 +1,15 @@
-# 🌀 Vane
+<p align="center">
+  <img src="assets/vane-logo.svg" alt="Vane Logo" width="220" />
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](https://www.kernel.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Nielkro/VaneProxy/pulls)
+<h1 align="center">Vane</h1>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.75%2B-orange.svg" alt="Rust 1.75+" /></a>
+  <a href="https://www.kernel.org/"><img src="https://img.shields.io/badge/Platform-Linux-lightgrey.svg" alt="Platform: Linux" /></a>
+  <a href="https://github.com/Nielkro/VaneProxy/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
+</p>
 
 **Vane** is a high-performance, asynchronous hybrid **Layer-4 (L4) SNI Multiplexer** and **Layer-7 (L7) Reverse Proxy** written in safe Rust.
 
