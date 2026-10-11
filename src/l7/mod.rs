@@ -31,7 +31,12 @@ where
     let conn = builder.serve_connection_with_upgrades(io, service);
     tokio::pin!(conn);
     if let Err(e) = conn.as_mut().await {
-        error!(peer = %peer_addr, error = %e, "L7 connection serving error");
+        let err_str = e.to_string();
+        if err_str.contains("unexpected-eof") || err_str.contains("close_notify") {
+            tracing::debug!(peer = %peer_addr, error = %e, "client closed connection without close_notify");
+        } else {
+            error!(peer = %peer_addr, error = %e, "L7 connection serving error");
+        }
     }
 }
 

@@ -31,6 +31,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/watcher.rs` — Zero-downtime hot reload coordinator with SIGHUP and 500ms debounce.
 - `Cargo.toml` — Package manifest: `penik-proxy` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
+- `penik-proxy.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `penik` user.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
 
 ## Docs

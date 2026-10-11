@@ -59,6 +59,11 @@ pub fn spawn_reload_watcher(
 
         info!("hot reload watcher active (SIGHUP + inotify with 500ms debounce)");
 
+        // 12-hour periodic renewal check for ACME certificates
+        let mut renewal_interval = tokio::time::interval(Duration::from_secs(12 * 3600));
+        // First tick completes immediately, skip it so we don't duplicate startup check
+        renewal_interval.tick().await;
+
         loop {
             tokio::select! {
                 Some(()) = rx.recv() => {
@@ -66,6 +71,22 @@ pub fn spawn_reload_watcher(
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     while rx.try_recv().is_ok() {}
                     reload_all(&state, &config_path, &sites_dir, &acme_mgr).await;
+                }
+                _ = renewal_interval.tick() => {
+                    info!("running scheduled 12-hour certificate renewal check...");
+                    if let Some(mgr) = &acme_mgr {
+                        let sites = state.sites();
+                        let mut domains = Vec::new();
+                        for s in sites.iter() {
+                            domains.extend(s.addresses.clone());
+                        }
+                        if !domains.is_empty() {
+                            let mgr_task = Arc::clone(mgr);
+                            tokio::spawn(async move {
+                                let _ = mgr_task.ensure_certificates(&domains).await;
+                            });
+                        }
+                    }
                 }
                 _ = async {
                     #[cfg(unix)]

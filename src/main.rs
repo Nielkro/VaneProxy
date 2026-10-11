@@ -176,10 +176,36 @@ async fn main() {
                 while let Ok((mut stream, _)) = lis.accept().await {
                     tokio::spawn(async move {
                         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                        let mut buf = [0u8; 1024];
+                        let mut buf = [0u8; 2048];
                         if let Ok(n) = stream.read(&mut buf).await {
                             if n > 0 {
-                                let resp = "HTTP/1.1 301 Moved Permanently\r\nLocation: https:///\r\nConnection: close\r\n\r\n";
+                                let req_str = String::from_utf8_lossy(&buf[..n]);
+                                let mut lines = req_str.lines();
+                                let first_line = lines.next().unwrap_or("");
+                                let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+
+                                let mut host = "";
+                                for line in lines {
+                                    if let Some(h) = line.strip_prefix("Host:") {
+                                        host = h.trim();
+                                        break;
+                                    } else if let Some(h) = line.strip_prefix("host:") {
+                                        host = h.trim();
+                                        break;
+                                    }
+                                }
+
+                                let clean_host = host.split(':').next().unwrap_or(host);
+                                let location = if clean_host.is_empty() {
+                                    format!("https://{}", path)
+                                } else {
+                                    format!("https://{}{}", clean_host, path)
+                                };
+
+                                let resp = format!(
+                                    "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                                    location
+                                );
                                 let _ = stream.write_all(resp.as_bytes()).await;
                             }
                         }

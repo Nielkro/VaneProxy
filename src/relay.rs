@@ -260,7 +260,17 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
                                 serve_l7_stream(tls_stream, site_arc, peer_addr).await;
                             }
                             Err(e) => {
-                                warn!(sni = %sni_owned, error = %e, "TLS handshake failed for L7 site");
+                                let err_str = e.to_string();
+                                if err_str.contains("unexpected-eof")
+                                    || err_str.contains("close_notify")
+                                    || err_str.contains("NoCipherSuitesInCommon")
+                                    || err_str.contains("Tls12NotOffered")
+                                    || err_str.contains("tls handshake eof")
+                                {
+                                    debug!(sni = %sni_owned, error = %e, "TLS handshake closed or incompatible scanner probe");
+                                } else {
+                                    warn!(sni = %sni_owned, error = %e, "TLS handshake failed for L7 site");
+                                }
                             }
                         }
                     });
