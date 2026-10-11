@@ -68,6 +68,25 @@ pub fn consolidate_sans(domains: &[String]) -> Vec<String> {
         if has_wildcard_or_subdomain {
             consolidated.insert(format!("*.{}", apex));
         }
+
+        // RFC 6125 §6.4.3: Wildcards (*.domain.com) only match a single level.
+        // For nested subdomains (e.g. met.home.slavchat.ru), *.slavchat.ru DOES NOT MATCH.
+        // Include both the exact domain and the sub-wildcard (*.home.slavchat.ru).
+        for domain in group {
+            let clean = domain.trim_start_matches("*.");
+            if clean != apex {
+                if let Some(parent) = clean.split_once('.').map(|(_, rest)| rest) {
+                    if parent != apex && parent.ends_with(&apex) {
+                        // Multi-level: add *.parent wildcard
+                        consolidated.insert(format!("*.{}", parent));
+                    }
+                }
+                // Always preserve the exact domain if explicitly requested or nested
+                if !domain.starts_with("*.") {
+                    consolidated.insert(domain.clone());
+                }
+            }
+        }
     }
 
     consolidated.into_iter().collect()

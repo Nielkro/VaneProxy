@@ -155,13 +155,19 @@ mod tests {
             "ad2.slavchat.ru".to_string(),
             "slavchat.ru".to_string(),
             "ad1.penik.ru".to_string(),
+            "met.home.slavchat.ru".to_string(),
         ];
         let sans = consolidate_sans(&domains);
         assert_eq!(
             sans,
             vec![
+                "*.home.slavchat.ru",
                 "*.penik.ru",
                 "*.slavchat.ru",
+                "ad1.penik.ru",
+                "ad1.slavchat.ru",
+                "ad2.slavchat.ru",
+                "met.home.slavchat.ru",
                 "penik.ru",
                 "slavchat.ru"
             ]

@@ -250,8 +250,14 @@ impl AcmeManager {
         // Download signed certificate chain
         let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
-        self.store.save_certificate(&cert_chain_pem)?;
-        self.store.save_private_key(&key_pem)?;
+        let primary_name = sans.first().cloned().unwrap_or_else(|| "default".to_string());
+        let apex = extract_apex_domain(&primary_name);
+
+        // Save unified and named certificates
+        let _ = self.store.save_certificate(&cert_chain_pem);
+        let _ = self.store.save_private_key(&key_pem);
+        let _ = self.store.save_named_certificate(&apex, &cert_chain_pem);
+        let _ = self.store.save_named_private_key(&apex, &key_pem);
 
         Ok(())
     }
@@ -267,7 +273,11 @@ impl AcmeManager {
         }
 
         for (apex, domains) in apex_groups {
-            let sans = consolidate_sans(&domains);
+            let sans = if self.cf_dns.is_some() {
+                consolidate_sans(&domains)
+            } else {
+                domains.iter().filter(|s| !s.starts_with("*.")).cloned().collect()
+            };
             info!(apex = %apex, sans = ?sans, "ordering partitioned certificate for apex domain");
             if let Err(e) = self.order_certificate(&sans).await {
                 error!(apex = %apex, error = %e, "failed to issue certificate for apex domain");
