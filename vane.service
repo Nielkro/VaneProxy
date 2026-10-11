@@ -1,13 +1,13 @@
 [Unit]
-Description=PenikProxy - SNI L4/L7 Router & Reverse Proxy
+Description=Vane - SNI L4/L7 Router & Reverse Proxy
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=penik
-Group=penik
-ExecStart=/usr/local/bin/penik-proxy --config /etc/penik-proxy/config.toml
+User=vane
+Group=vane
+ExecStart=/usr/local/bin/vane --config /etc/vane/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=3

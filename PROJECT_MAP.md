@@ -29,9 +29,11 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
 - `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with apex domain grouping and hot-reloading support.
 - `src/watcher.rs` — Zero-downtime hot reload coordinator with configurable periodic renewal interval, SIGHUP, and 500ms debounce.
-- `Cargo.toml` — Package manifest: `penik-proxy` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
+- `Cargo.toml` — Package manifest: `vane` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
-- `penik-proxy.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `penik` user.
+- `vane.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `vane` user.
+- `README.md` — Project documentation, architecture diagrams, and quickstart guide.
+- `LICENSE` — MIT open-source license.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
 - `config.production.toml` — Production configuration template with strict security, DNS-01/ALPN, and L4/L7 routing.
 

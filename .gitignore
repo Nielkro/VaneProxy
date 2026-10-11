@@ -5,6 +5,8 @@ certs/
 account.json
 cloudflare.ini
 penik.toml
+vane.toml
 sites-enabled/
 test_*.py
 /tmp/penik*
+/tmp/vane*

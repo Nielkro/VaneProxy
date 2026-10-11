@@ -1,12 +1,13 @@
 [package]
-name = "penik-proxy"
+name = "vane"
 version = "0.1.0"
 edition = "2021"
-description = "SNI-based TCP router: :443 -> Xray (raw) / Caddy (PROXY protocol v2)"
+description = "High-performance hybrid L4 SNI router & L7 reverse proxy with native Auto-SSL (ACME v2), Caddyfile syntax, and WebSockets"
 license = "MIT"
+repository = "https://github.com/Nielkro/VaneProxy"
 
 [[bin]]
-name = "penik-proxy"
+name = "vane"
 path = "src/main.rs"
 
 [dependencies]
