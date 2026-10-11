@@ -48,19 +48,22 @@ mod tests {
     #[test]
     fn test_cert_validity_and_domain_coverage() {
         let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-        let params = rcgen::CertificateParams::new(vec![
+        let mut params = rcgen::CertificateParams::new(vec![
             "api.slavchat.ru".into(),
             "*.penik.ru".into(),
         ])
         .unwrap();
+        // Set explicit validity window (2025 to 2027)
+        params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2027, 1, 1);
         let cert = params.self_signed(&key_pair).unwrap();
         let cert_pem = cert.pem();
 
         // 1. Validity check: cert is valid now (threshold 0)
         assert!(CertStore::is_cert_pem_valid(&cert_pem, 0));
 
-        // 2. When threshold exceeds validity period (e.g. 50 years in seconds), returns false (needs renewal)
-        assert!(!CertStore::is_cert_pem_valid(&cert_pem, 50 * 365 * 86400));
+        // 2. When threshold exceeds validity period (e.g. 5 years in seconds), returns false (needs renewal)
+        assert!(!CertStore::is_cert_pem_valid(&cert_pem, 5 * 365 * 86400));
 
         // 3. Domain coverage check
         assert!(CertStore::cert_pem_covers_domain(&cert_pem, "api.slavchat.ru", 0));
