@@ -69,12 +69,20 @@ pub async fn forward_request(
     header_ops_up: &[HeaderOp],
     header_ops_down: &[HeaderOp],
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let host_header = req
+    let mut host_header = req
         .headers()
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    // HTTP/2 downstream requests carry the authority in :authority rather
+    // than a Host header; hyper may leave the header map empty, so fall back
+    // to the URI authority before normalizing to origin-form.
+    if host_header.is_empty() {
+        if let Some(auth) = req.uri().authority() {
+            host_header = auth.as_str().to_string();
+        }
+    }
 
     // Detect if this is a WebSocket upgrade request
     let is_upgrade = req
@@ -84,8 +92,28 @@ pub async fn forward_request(
         .map(|s| s.to_ascii_lowercase().contains("upgrade"))
         .unwrap_or(false);
 
+    // Normalize the request target to origin-form (path + query) and ensure
+    // a Host header is present, matching Caddy reverse_proxy semantics.
+    // Downstream HTTP/2 requests arrive with an absolute-form URI and the
+    // authority living in :authority; the hyper HTTP/1 upstream client would
+    // otherwise emit a proxy-form request line with no Host header, which
+    // strict upstreams reject with 400.
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_owned())
+        .unwrap_or_else(|| "/".to_string());
+    if let Ok(origin_uri) = path_and_query.parse::<hyper::Uri>() {
+        *req.uri_mut() = origin_uri;
+    }
+
     // Inject standard reverse proxy headers
     let headers = req.headers_mut();
+    if !host_header.is_empty() && !headers.contains_key(header::HOST) {
+        if let Ok(host_val) = HeaderValue::from_str(&host_header) {
+            headers.insert(header::HOST, host_val);
+        }
+    }
     headers.insert(
         HeaderName::from_static("x-forwarded-for"),
         HeaderValue::from_str(&peer_addr.ip().to_string()).unwrap(),
