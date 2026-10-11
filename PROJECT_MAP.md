@@ -34,6 +34,9 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `vane.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `vane` user.
 - `vane_yandere.py` — Parody single-file Python port of Vane L4 core in YandereDev style: giant if/elif chains, globals, magic strings, duplicated PPv2 encoders, Update() polling loop.
 - `assets/vane-logo.svg` — Aerodynamic neon SVG vector logo for Vane.
+- `assets/vane-social-preview.svg` — High-resolution 1280x640 GitHub social preview vector card with safe padding and feature badges.
+- `assets/vane-social-preview.webp` — WebP rasterized social preview card for GitHub repository settings.
+- `assets/vane-social-preview.png` — High-fidelity PNG fallback preview image.
 - `README.md` — Project documentation, architecture diagrams, and quickstart guide.
 - `LICENSE` — MIT open-source license.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
