@@ -3,13 +3,35 @@ name: CI & E2E Tests
 on:
   push:
     branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tests/e2e/**'
+      - '.github/workflows/e2e.yml'
   pull_request:
     branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tests/e2e/**'
+      - '.github/workflows/e2e.yml'
 
 jobs:
   test:
     name: Unit & E2E Integration Tests
     runs-on: ubuntu-latest
+
+    services:
+      pebble:
+        image: ghcr.io/letsencrypt/pebble:latest
+        ports:
+          - 14000:14000
+        env:
+          PEBBLE_VA_ALWAYS_VALID: 1
+          PEBBLE_VA_NOSLEEP: 1
+          PEBBLE_WFE_NONCEREJECT: 0
 
     steps:
       - name: Checkout repository

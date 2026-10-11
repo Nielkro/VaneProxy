@@ -160,13 +160,13 @@ mod tests {
         let resolver = DynamicCertResolver::new(None);
 
         // Generate self-signed cert for slavchat.ru
-        let key_slav = KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let key_slav = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let params_slav =
             CertificateParams::new(vec!["slavchat.ru".into(), "chat.slavchat.ru".into()]).unwrap();
         let cert_slav = params_slav.self_signed(&key_slav).unwrap();
 
         // Generate self-signed cert for penik.ru
-        let key_penik = KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let key_penik = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let params_penik =
             CertificateParams::new(vec!["penik.ru".into(), "test.dev.penik.ru".into()]).unwrap();
         let cert_penik = params_penik.self_signed(&key_penik).unwrap();

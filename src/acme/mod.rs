@@ -20,7 +20,7 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("penik_test_store_{}", std::process::id()));
         let store = CertStore::new(&temp_dir).expect("should create store");
 
-        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let params = rcgen::CertificateParams::new(vec!["example.com".into()]).unwrap();
         let cert = params.self_signed(&key_pair).unwrap();
         let cert_content = cert.pem();
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn test_cert_validity_and_domain_coverage() {
-        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let params = rcgen::CertificateParams::new(vec![
             "api.slavchat.ru".into(),
             "*.penik.ru".into(),

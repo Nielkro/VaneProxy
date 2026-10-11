@@ -117,7 +117,25 @@ class VaneE2ETestCase(unittest.TestCase):
         cls.vane_bin = os.path.abspath(vane_bin)
         cls.config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "config.ci.toml"))
 
-        # 2. Start mock background servers in a separate thread/event loop
+        # 2. Ensure test certificate exists for L7 TLS testing
+        certs_dir = os.path.join(os.path.dirname(__file__), "certs")
+        os.makedirs(certs_dir, exist_ok=True)
+        cert_path = os.path.join(certs_dir, "site.test.local.fullchain.pem")
+        key_path = os.path.join(certs_dir, "site.test.local.privkey.pem")
+        if not os.path.exists(cert_path) or not os.path.exists(key_path):
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "ec",
+                "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                "-keyout", key_path,
+                "-out", cert_path,
+                "-days", "365", "-nodes",
+                "-subj", "/CN=site.test.local",
+                "-addext", "subjectAltName = DNS:site.test.local,DNS:static.test.local"
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.chmod(key_path, 0o600)
+        cls.cert_path = cert_path
+
+        # 3. Start mock background servers in a separate thread/event loop
         import threading
         cls.loop = asyncio.new_event_loop()
         cls.reality_server = MockRealityServer()
@@ -131,7 +149,7 @@ class VaneE2ETestCase(unittest.TestCase):
         cls.server_thread = threading.Thread(target=cls.loop.run_forever, daemon=True)
         cls.server_thread.start()
 
-        # 3. Start Vane binary process
+        # 4. Start Vane binary process
         cls.vane_process = subprocess.Popen(
             [cls.vane_bin, "--config", cls.config_path],
             stdout=subprocess.PIPE,
@@ -216,6 +234,49 @@ class VaneE2ETestCase(unittest.TestCase):
         response = s.recv(1024)
         s.close()
         self.assertEqual(response.strip(), b"REALITY_RAW_OK")
+
+    def test_07_ssl_termination_and_certificate_verification(self):
+        """Terminates TLS with SNI, validates X.509 certificate (CN/SAN/expiry), and verifies HTTPS L7 response."""
+        import ssl
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        context.load_verify_locations(self.cert_path)
+        
+        raw_sock = socket.create_connection(("127.0.0.1", 18443), timeout=5)
+        with context.wrap_socket(raw_sock, server_hostname="static.test.local") as ssl_sock:
+            # 1. Verify TLS handshake and protocol
+            self.assertIn(ssl_sock.version(), ["TLSv1.2", "TLSv1.3"])
+            
+            # 2. Verify certificate properties
+            cert = ssl_sock.getpeercert()
+            self.assertIsNotNone(cert, "Peer certificate must be presented")
+            
+            # Check Subject CN
+            subject = dict(x[0] for x in cert.get("subject", ()))
+            self.assertEqual(subject.get("commonName"), "site.test.local")
+            
+            # Check Subject Alternative Names (SANs)
+            sans = [val for kind, val in cert.get("subjectAltName", ()) if kind == "DNS"]
+            self.assertIn("site.test.local", sans)
+            self.assertIn("static.test.local", sans)
+            
+            # 3. Perform HTTPS GET request to L7 static file server
+            request = (
+                b"GET /index.html HTTP/1.1\r\n"
+                b"Host: static.test.local\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            ssl_sock.sendall(request)
+            
+            response = b""
+            while True:
+                chunk = ssl_sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+
+            resp_str = response.decode("utf-8", errors="replace")
+            self.assertIn("HTTP/1.1 200 OK", resp_str)
+            self.assertIn("Vane Static File Hosting Works!", resp_str)
 
 
 if __name__ == "__main__":

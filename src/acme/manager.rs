@@ -46,6 +46,10 @@ pub struct AcmeConfig {
     pub cloudflare_credentials: Option<PathBuf>,
     /// Direct Cloudflare API token, if configured.
     pub cloudflare_token: Option<String>,
+    /// Custom ACME directory URL (e.g. for Pebble or local ACME servers).
+    pub directory_url: Option<String>,
+    /// Optional custom Root CA certificate path (e.g. for Pebble minica.pem).
+    pub root_ca: Option<PathBuf>,
 }
 
 /// Manages certificate ordering, challenge resolution, and renewals.
@@ -87,17 +91,27 @@ impl AcmeManager {
         &self.store
     }
 
+    fn account_builder(&self) -> Result<instant_acme::AccountBuilder, AcmeError> {
+        if let Some(ca_path) = &self.config.root_ca {
+            instant_acme::Account::builder_with_root(ca_path).map_err(AcmeError::InstantAcme)
+        } else {
+            instant_acme::Account::builder().map_err(AcmeError::InstantAcme)
+        }
+    }
+
     /// Obtains an active ACME account (loading saved credentials or creating a new account).
     async fn get_or_create_account(&self) -> Result<Account, AcmeError> {
-        let directory_url = if self.config.staging {
-            LetsEncrypt::Staging.url()
+        let directory_url = if let Some(custom_url) = &self.config.directory_url {
+            custom_url.clone()
+        } else if self.config.staging {
+            LetsEncrypt::Staging.url().to_string()
         } else {
-            LetsEncrypt::Production.url()
+            LetsEncrypt::Production.url().to_string()
         };
 
         if let Some(account_json) = self.store.load_account() {
             if let Ok(creds) = serde_json::from_str::<AccountCredentials>(&account_json) {
-                if let Ok(builder) = Account::builder() {
+                if let Ok(builder) = self.account_builder() {
                     if let Ok(account) = builder.from_credentials(creds).await {
                         return Ok(account);
                     }
@@ -105,9 +119,9 @@ impl AcmeManager {
             }
         }
 
-        info!(email = %self.config.email, staging = self.config.staging, "creating new ACME account");
+        info!(email = %self.config.email, directory_url = %directory_url, "creating new ACME account");
         let contact = format!("mailto:{}", self.config.email);
-        let builder = Account::builder()?;
+        let builder = self.account_builder()?;
         let (account, creds) = builder
             .create(
                 &NewAccount {
@@ -115,7 +129,7 @@ impl AcmeManager {
                     terms_of_service_agreed: true,
                     only_return_existing: false,
                 },
-                directory_url.to_string(),
+                directory_url,
                 None,
             )
             .await?;

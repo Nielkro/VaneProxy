@@ -6,6 +6,12 @@ log_level = "debug"
 access_log = true
 sites_dir = "tests/e2e/sites-enabled"
 http_listen = "127.0.0.1:18080"
+ 
+[tls]
+storage_dir = "tests/e2e/certs"
+email = "test@vane.local"
+directory_url = "https://localhost:14000/dir"
+root_ca = "tests/e2e/pebble/pebble.minica.pem"
 
 [backends.reality_raw]
 addr = "127.0.0.1:19443"

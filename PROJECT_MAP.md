@@ -38,9 +38,10 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `LICENSE` — MIT open-source license.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
 - `config.production.toml` — Production configuration template with strict security, DNS-01/ALPN, and L4/L7 routing.
-- `tests/e2e/test_vane.py` — Standalone Python E2E integration test suite testing L4 SNI routing, PROXY protocol v2, default fallback, HTTP redirect, and SIGHUP hot reload.
-- `tests/e2e/config.ci.toml` — Isolated CI/E2E configuration file for Vane test runners.
-- `.github/workflows/e2e.yml` — GitHub Actions CI pipeline running unit tests, binary build, and zero-dependency Python E2E integration suite.
+- `tests/e2e/test_vane.py` — Standalone Python E2E integration test suite testing L4 SNI routing, PROXY protocol v2, default fallback, HTTP redirect, SIGHUP hot reload, and TLS termination with X.509 certificate verification.
+- `tests/e2e/config.ci.toml` — Isolated CI/E2E configuration file for Vane test runners supporting local Pebble ACME server and custom root CA.
+- `tests/e2e/pebble/pebble.minica.pem` — Pebble Root CA certificate for local ACME testing.
+- `.github/workflows/e2e.yml` — GitHub Actions CI pipeline running unit tests, binary build, Pebble ACME service container, and zero-dependency Python E2E integration suite.
 
 ## Docs
 

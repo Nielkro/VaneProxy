@@ -115,6 +115,8 @@ async fn main() {
                     storage_dir,
                     cloudflare_credentials: tls_cfg.cloudflare_credentials.clone(),
                     cloudflare_token: tls_cfg.cloudflare_token.clone(),
+                    directory_url: tls_cfg.directory_url.clone(),
+                    root_ca: tls_cfg.root_ca.clone(),
                 };
                 if let Ok(mgr) = acme::AcmeManager::new(acme_config, (*alpn_registry).clone()) {
                     let mgr_arc = Arc::new(mgr);
