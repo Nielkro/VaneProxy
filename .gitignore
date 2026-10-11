@@ -6,7 +6,6 @@ account.json
 cloudflare.ini
 penik.toml
 vane.toml
-sites-enabled/
-test_*.py
+/sites-enabled/
 /tmp/penik*
 /tmp/vane*

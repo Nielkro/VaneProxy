@@ -1,0 +1,8 @@
+site.test.local {
+    reverse_proxy 127.0.0.1:19099
+}
+
+static.test.local {
+    root * tests/e2e/static
+    file_server
+}

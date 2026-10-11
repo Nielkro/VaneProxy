@@ -1,0 +1,36 @@
+name: CI & E2E Tests
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Unit & E2E Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Unit Tests
+        run: cargo test --all-targets --verbose
+
+      - name: Build Vane Binary
+        run: cargo build --verbose
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Python E2E Tests (Zero Dependencies)
+        run: python3 tests/e2e/test_vane.py

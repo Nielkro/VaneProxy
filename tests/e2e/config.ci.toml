@@ -1,0 +1,24 @@
+# E2E Test configuration for Vane
+listen = ["127.0.0.1:18443"]
+strict_listen = true
+default_backend = "caddy_upstream"
+log_level = "debug"
+access_log = true
+sites_dir = "tests/e2e/sites-enabled"
+http_listen = "127.0.0.1:18080"
+
+[backends.reality_raw]
+addr = "127.0.0.1:19443"
+send_proxy_protocol = false
+
+[backends.caddy_upstream]
+addr = "127.0.0.1:19444"
+send_proxy_protocol = true
+
+[[routes]]
+sni = "reality.test.local"
+backend = "reality_raw"
+
+[[routes]]
+sni = "caddy.test.local"
+backend = "caddy_upstream"
