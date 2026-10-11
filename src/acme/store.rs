@@ -67,6 +67,13 @@ impl CertStore {
             || self.load_all_certificates().map(|v| !v.is_empty()).unwrap_or(false)
     }
 
+    /// Checks if a certificate already exists on disk for a given domain/apex.
+    pub fn has_certificate_for(&self, name: &str) -> bool {
+        let clean = name.trim().trim_start_matches("*.").to_lowercase();
+        (self.cert_path_for(&clean).exists() && self.key_path_for(&clean).exists())
+            || (self.cert_path().exists() && self.key_path().exists())
+    }
+
     /// Saves private key with strict 0600 file permissions for a specific domain name.
     pub fn save_named_private_key(&self, name: &str, key_pem: &str) -> Result<(), StoreError> {
         let path = self.key_path_for(name);

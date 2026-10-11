@@ -136,6 +136,13 @@ impl AcmeManager {
             return Ok(());
         }
 
+        // Check if certificates already exist on disk covering the domains
+        let all_exist = site_domains.iter().all(|d| self.store.has_certificate_for(d));
+        if all_exist {
+            info!("valid certificates already exist on disk for all domains, skipping ACME order");
+            return Ok(());
+        }
+
         let sans = if self.cf_dns.is_some() {
             consolidate_sans(site_domains)
         } else {
