@@ -60,8 +60,13 @@ pub fn spawn_reload_watcher(
 
         info!("hot reload watcher active (SIGHUP + inotify with 500ms debounce)");
 
-        // 12-hour periodic renewal check for ACME certificates
-        let mut renewal_interval = tokio::time::interval(Duration::from_secs(12 * 3600));
+        // Periodic renewal check for ACME certificates (default 12 hours, or configurable via config / env)
+        let renewal_secs = std::env::var("PENIK_RENEWAL_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| state.config().tls.as_ref().and_then(|t| t.renewal_interval_secs))
+            .unwrap_or(12 * 3600);
+        let mut renewal_interval = tokio::time::interval(Duration::from_secs(renewal_secs));
         // First tick completes immediately, skip it so we don't duplicate startup check
         renewal_interval.tick().await;
 
@@ -74,7 +79,7 @@ pub fn spawn_reload_watcher(
                     reload_all(&state, &config_path, &sites_dir, &acme_mgr, &cert_resolver).await;
                 }
                 _ = renewal_interval.tick() => {
-                    info!("running scheduled 12-hour certificate renewal check...");
+                    info!(interval_secs = renewal_secs, "running scheduled certificate renewal check...");
                     if let (Some(mgr), Some(resolver)) = (&acme_mgr, &cert_resolver) {
                         let sites = state.sites();
                         let mut domains = Vec::new();

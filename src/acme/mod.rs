@@ -20,12 +20,17 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("penik_test_store_{}", std::process::id()));
         let store = CertStore::new(&temp_dir).expect("should create store");
 
-        let cert_content = "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n";
-        let key_content = "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----\n";
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["example.com".into()]).unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_content = cert.pem();
+        let key_content = key_pair.serialize_pem();
 
-        store.save_certificate(cert_content).expect("should save cert");
-        store.save_private_key(key_content).expect("should save key");
+        store.save_certificate(&cert_content).expect("should save cert");
+        store.save_private_key(&key_content).expect("should save key");
 
+        // Since rcgen generates certs valid for roughly 1 year by default,
+        // it has plenty of time remaining and has_certificate() should be true
         assert!(store.has_certificate());
         assert_eq!(store.load_certificate().unwrap(), cert_content);
         assert_eq!(store.load_private_key().unwrap(), key_content);
@@ -38,6 +43,29 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cert_validity_and_domain_coverage() {
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let params = rcgen::CertificateParams::new(vec![
+            "api.slavchat.ru".into(),
+            "*.penik.ru".into(),
+        ])
+        .unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_pem = cert.pem();
+
+        // 1. Validity check: cert is valid now (threshold 0)
+        assert!(CertStore::is_cert_pem_valid(&cert_pem, 0));
+
+        // 2. When threshold exceeds validity period (e.g. 50 years in seconds), returns false (needs renewal)
+        assert!(!CertStore::is_cert_pem_valid(&cert_pem, 50 * 365 * 86400));
+
+        // 3. Domain coverage check
+        assert!(CertStore::cert_pem_covers_domain(&cert_pem, "api.slavchat.ru", 0));
+        assert!(CertStore::cert_pem_covers_domain(&cert_pem, "test.penik.ru", 0));
+        assert!(!CertStore::cert_pem_covers_domain(&cert_pem, "unrelated.org", 0));
     }
 
     #[test]

@@ -4,6 +4,9 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use thiserror::Error;
+use x509_parser::extensions::GeneralName;
+use x509_parser::pem::Pem;
+use x509_parser::prelude::*;
 
 /// Storage errors.
 #[derive(Debug, Error)]
@@ -61,18 +64,131 @@ impl CertStore {
         self.base_dir.join("account.json")
     }
 
-    /// Checks if a valid certificate and key are present on disk (default or named).
-    pub fn has_certificate(&self) -> bool {
-        (self.cert_path().exists() && self.key_path().exists())
-            || self.load_all_certificates().map(|v| !v.is_empty()).unwrap_or(false)
+    /// Configured renewal threshold in seconds (default 30 days, or overridden via PENIK_RENEWAL_THRESHOLD_SECS).
+    pub fn renewal_threshold_secs() -> u64 {
+        std::env::var("PENIK_RENEWAL_THRESHOLD_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30 * 86400)
     }
 
-    /// Checks if a certificate already exists on disk for a given domain/apex.
+    /// Checks if a certificate in PEM format has at least `min_remaining_secs` remaining before expiry.
+    pub fn is_cert_pem_valid(cert_pem: &str, min_remaining_secs: u64) -> bool {
+        for pem in Pem::iter_from_buffer(cert_pem.as_bytes()).flatten() {
+            if pem.label == "CERTIFICATE" {
+                if let Ok((_, x509)) = X509Certificate::from_der(&pem.contents) {
+                    let not_after = x509.validity().not_after.timestamp();
+                    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                        Ok(d) => d.as_secs() as i64,
+                        Err(_) => return false,
+                    };
+                    return (not_after - now) > min_remaining_secs as i64;
+                }
+            }
+        }
+        false
+    }
+
+    /// Checks if a certificate in PEM format covers the given domain and has at least `min_remaining_secs` remaining.
+    pub fn cert_pem_covers_domain(cert_pem: &str, domain: &str, min_remaining_secs: u64) -> bool {
+        let domain_clean = domain.trim().trim_start_matches("*.").to_lowercase();
+        for pem in Pem::iter_from_buffer(cert_pem.as_bytes()).flatten() {
+            if pem.label == "CERTIFICATE" {
+                if let Ok((_, x509)) = X509Certificate::from_der(&pem.contents) {
+                    let not_after = x509.validity().not_after.timestamp();
+                    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                        Ok(d) => d.as_secs() as i64,
+                        Err(_) => return false,
+                    };
+                    if (not_after - now) <= min_remaining_secs as i64 {
+                        return false;
+                    }
+
+                    // 1. Check SAN extension
+                    if let Ok(Some(san_ext)) = x509.subject_alternative_name() {
+                        for name in &san_ext.value.general_names {
+                            if let GeneralName::DNSName(dns) = name {
+                                let dns_lower = dns.to_lowercase();
+                                if dns_lower == domain_clean
+                                    || crate::caddyfile::cluster::matches_site_address(&dns_lower, &domain_clean)
+                                    || (dns_lower.starts_with("*.") && domain_clean.ends_with(&dns_lower[1..]))
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Check Common Name (CN)
+                    for rdn in x509.subject().iter_rdn() {
+                        for attr in rdn.iter() {
+                            if attr.attr_type() == &x509_parser::oid_registry::OID_X509_COMMON_NAME {
+                                if let Ok(cn) = attr.as_str() {
+                                    let cn_lower = cn.to_lowercase();
+                                    if cn_lower == domain_clean
+                                        || crate::caddyfile::cluster::matches_site_address(&cn_lower, &domain_clean)
+                                    {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Checks if a valid, non-expired certificate and key are present on disk.
+    pub fn has_certificate(&self) -> bool {
+        let threshold = Self::renewal_threshold_secs();
+        if let Ok(pem) = self.load_certificate() {
+            if Self::is_cert_pem_valid(&pem, threshold) && self.key_path().exists() {
+                return true;
+            }
+        }
+        if let Ok(all) = self.load_all_certificates() {
+            for c in all {
+                if Self::is_cert_pem_valid(&c.cert_pem, threshold) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Checks if a valid, non-expired certificate covering the domain exists on disk.
     pub fn has_certificate_for(&self, name: &str) -> bool {
+        let threshold = Self::renewal_threshold_secs();
         let clean = name.trim().trim_start_matches("*.").to_lowercase();
         let apex = crate::caddyfile::cluster::extract_apex_domain(&clean);
-        (self.cert_path_for(&clean).exists() && self.key_path_for(&clean).exists())
-            || (self.cert_path_for(&apex).exists() && self.key_path_for(&apex).exists())
+
+        let candidate_paths = [
+            self.cert_path_for(&clean),
+            self.cert_path_for(&apex),
+            self.cert_path(),
+        ];
+
+        for path in &candidate_paths {
+            if path.exists() {
+                if let Ok(pem) = fs::read_to_string(path) {
+                    if Self::cert_pem_covers_domain(&pem, &clean, threshold) {
+                        let key_path = if *path == self.cert_path() {
+                            self.key_path()
+                        } else if path.ends_with(format!("{}.fullchain.pem", clean)) {
+                            self.key_path_for(&clean)
+                        } else {
+                            self.key_path_for(&apex)
+                        };
+                        if key_path.exists() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Saves private key with strict 0600 file permissions for a specific domain name.

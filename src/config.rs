@@ -47,6 +47,8 @@ pub struct TlsConf {
     pub cloudflare_token: Option<String>,
     #[serde(default)]
     pub staging: bool,
+    #[serde(default)]
+    pub renewal_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

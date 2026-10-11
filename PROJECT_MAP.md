@@ -20,7 +20,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/acme/mod.rs` — ACME module root and lifecycle integration tests.
 - `src/acme/dns_cloudflare.rs` — Cloudflare DNS-01 API client for TXT challenge records.
 - `src/acme/alpn_challenge.rs` — Ephemeral TLS-ALPN-01 challenge certificate manager (RFC 8737).
-- `src/acme/store.rs` — Certificate and credential persistence with 0600 file permissions and named apex certificate loading.
+- `src/acme/store.rs` — Certificate persistence with 0600 file permissions, X.509 notAfter expiration parsing, SAN domain coverage validation, and apex loading.
 - `src/acme/manager.rs` — High-level ACME order manager with unified multi-SAN and partitioning fallback.
 - `src/l7/mod.rs` — Layer-7 reverse proxy and static asset HTTP server engine.
 - `src/l7/proxy.rs` — Upstream HTTP reverse proxy forwarder with WebSocket upgrade support.
@@ -28,7 +28,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/l7/static_files.rs` — Static file server with traversal protection and MIME detection.
 - `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
 - `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with apex domain grouping and hot-reloading support.
-- `src/watcher.rs` — Zero-downtime hot reload coordinator with SIGHUP and 500ms debounce.
+- `src/watcher.rs` — Zero-downtime hot reload coordinator with configurable periodic renewal interval, SIGHUP, and 500ms debounce.
 - `Cargo.toml` — Package manifest: `penik-proxy` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `penik-proxy.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `penik` user.
