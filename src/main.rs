@@ -95,16 +95,11 @@ async fn main() {
 
             // Load all existing certificates from disk
             if let Ok(all_certs) = store.load_all_certificates() {
-                for (cert_pem, key_pem) in all_certs {
-                    if let Ok(certified_key) = tls::parse_certified_key(&cert_pem, &key_pem) {
-                        let mut cert_domains = Vec::new();
-                        for s in &sites {
-                            cert_domains.extend(s.addresses.clone());
-                        }
-                        resolver.register_certified_key(&cert_domains, certified_key.clone());
-                        resolver.set_certified_key(certified_key);
-                    }
+                let mut cert_domains = Vec::new();
+                for s in &sites {
+                    cert_domains.extend(s.addresses.clone());
                 }
+                resolver.register_loaded_certs(&cert_domains, &all_certs);
             }
 
             if let Ok(server_config) = tls::create_server_config(resolver.clone()) {
@@ -137,13 +132,8 @@ async fn main() {
                         tokio::spawn(async move {
                             if let Ok(()) = mgr_task.ensure_certificates(&site_domains).await {
                                 if let Ok(all_certs) = mgr_task.store().load_all_certificates() {
-                                    for (cert_pem, key_pem) in all_certs {
-                                        if let Ok(ck) = tls::parse_certified_key(&cert_pem, &key_pem) {
-                                            if let Some(res) = &resolver_opt {
-                                                res.register_certified_key(&domains_copy, ck.clone());
-                                                res.set_certified_key(ck);
-                                            }
-                                        }
+                                    if let Some(res) = &resolver_opt {
+                                        res.register_loaded_certs(&domains_copy, &all_certs);
                                     }
                                 }
                             }

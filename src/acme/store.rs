@@ -70,8 +70,9 @@ impl CertStore {
     /// Checks if a certificate already exists on disk for a given domain/apex.
     pub fn has_certificate_for(&self, name: &str) -> bool {
         let clean = name.trim().trim_start_matches("*.").to_lowercase();
+        let apex = crate::caddyfile::cluster::extract_apex_domain(&clean);
         (self.cert_path_for(&clean).exists() && self.key_path_for(&clean).exists())
-            || (self.cert_path().exists() && self.key_path().exists())
+            || (self.cert_path_for(&apex).exists() && self.key_path_for(&apex).exists())
     }
 
     /// Saves private key with strict 0600 file permissions for a specific domain name.
@@ -195,13 +196,17 @@ impl CertStore {
     }
 
     /// Loads all available certificate and private key pairs from disk.
-    pub fn load_all_certificates(&self) -> Result<Vec<(String, String)>, StoreError> {
+    pub fn load_all_certificates(&self) -> Result<Vec<LoadedCert>, StoreError> {
         let mut list = Vec::new();
 
         // 1. Default fullchain.pem / privkey.pem if present
         if self.cert_path().exists() && self.key_path().exists() {
             if let (Ok(cert), Ok(key)) = (self.load_certificate(), self.load_private_key()) {
-                list.push((cert, key));
+                list.push(LoadedCert {
+                    name: None,
+                    cert_pem: cert,
+                    key_pem: key,
+                });
             }
         }
 
@@ -210,13 +215,18 @@ impl CertStore {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                    if file_name.ends_with(".fullchain.pem") {
-                        let prefix = file_name.trim_end_matches(".fullchain.pem");
-                        let key_name = format!("{}.privkey.pem", prefix);
-                        let key_path = self.base_dir.join(key_name);
-                        if key_path.exists() {
-                            if let (Ok(cert), Ok(key)) = (fs::read_to_string(&path), fs::read_to_string(&key_path)) {
-                                list.push((cert, key));
+                    if let Some(prefix) = file_name.strip_suffix(".fullchain.pem") {
+                        if !prefix.is_empty() {
+                            let key_name = format!("{}.privkey.pem", prefix);
+                            let key_path = self.base_dir.join(key_name);
+                            if key_path.exists() {
+                                if let (Ok(cert), Ok(key)) = (fs::read_to_string(&path), fs::read_to_string(&key_path)) {
+                                    list.push(LoadedCert {
+                                        name: Some(prefix.to_string()),
+                                        cert_pem: cert,
+                                        key_pem: key,
+                                    });
+                                }
                             }
                         }
                     }
@@ -226,4 +236,13 @@ impl CertStore {
 
         Ok(list)
     }
+}
+
+/// A certificate and private key pair loaded from disk, optionally associated with an apex or domain name.
+#[derive(Debug, Clone)]
+pub struct LoadedCert {
+    /// Apex or domain name if this is a named certificate (e.g. "penik.ru"), or None for default fullchain.pem.
+    pub name: Option<String>,
+    pub cert_pem: String,
+    pub key_pem: String,
 }

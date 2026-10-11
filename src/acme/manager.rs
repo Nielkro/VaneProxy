@@ -257,14 +257,22 @@ impl AcmeManager {
         // Download signed certificate chain
         let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
-        let primary_name = sans.first().cloned().unwrap_or_else(|| "default".to_string());
-        let apex = extract_apex_domain(&primary_name);
-
-        // Save unified and named certificates
+        // Save unified fallback certificates
         let _ = self.store.save_certificate(&cert_chain_pem);
         let _ = self.store.save_private_key(&key_pem);
-        let _ = self.store.save_named_certificate(&apex, &cert_chain_pem);
-        let _ = self.store.save_named_private_key(&apex, &key_pem);
+
+        // Save named certificates for all apex domains covered by this order
+        let mut apexes = std::collections::BTreeSet::new();
+        for s in sans {
+            apexes.insert(extract_apex_domain(s));
+        }
+        if apexes.is_empty() {
+            apexes.insert("default".to_string());
+        }
+        for apex in apexes {
+            let _ = self.store.save_named_certificate(&apex, &cert_chain_pem);
+            let _ = self.store.save_named_private_key(&apex, &key_pem);
+        }
 
         Ok(())
     }

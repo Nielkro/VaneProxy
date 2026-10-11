@@ -88,12 +88,7 @@ pub fn spawn_reload_watcher(
                             tokio::spawn(async move {
                                 if let Ok(()) = mgr_task.ensure_certificates(&domains).await {
                                     if let Ok(all_certs) = mgr_task.store().load_all_certificates() {
-                                        for (cert_pem, key_pem) in all_certs {
-                                            if let Ok(ck) = crate::tls::parse_certified_key(&cert_pem, &key_pem) {
-                                                resolver_clone.register_certified_key(&domains_clone, ck.clone());
-                                                resolver_clone.set_certified_key(ck);
-                                            }
-                                        }
+                                        resolver_clone.register_loaded_certs(&domains_clone, &all_certs);
                                     }
                                 }
                             });
@@ -170,12 +165,7 @@ async fn reload_all(
             tokio::spawn(async move {
                 if let Ok(()) = mgr_clone.ensure_certificates(&domains).await {
                     if let Ok(all_certs) = mgr_clone.store().load_all_certificates() {
-                        for (cert_pem, key_pem) in all_certs {
-                            if let Ok(ck) = crate::tls::parse_certified_key(&cert_pem, &key_pem) {
-                                resolver_clone.register_certified_key(&domains_clone, ck.clone());
-                                resolver_clone.set_certified_key(ck);
-                            }
-                        }
+                        resolver_clone.register_loaded_certs(&domains_clone, &all_certs);
                     }
                 }
             });

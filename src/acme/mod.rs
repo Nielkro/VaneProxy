@@ -8,7 +8,7 @@ pub mod store;
 pub use alpn_challenge::{AlpnChallengeCert, AlpnChallengeRegistry};
 pub use dns_cloudflare::CloudflareDns;
 pub use manager::{AcmeConfig, AcmeError, AcmeManager};
-pub use store::CertStore;
+pub use store::{CertStore, LoadedCert};
 
 #[cfg(test)]
 mod tests {

@@ -6,7 +6,7 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
 use crate::acme::alpn_challenge::AlpnChallengeRegistry;
-use crate::caddyfile::cluster::matches_site_address;
+use crate::caddyfile::cluster::{extract_apex_domain, matches_site_address};
 
 /// Dynamic server certificate resolver supporting multiple domains, wildcards, and TLS-ALPN-01.
 #[derive(Debug, Default)]
@@ -58,6 +58,52 @@ impl DynamicCertResolver {
         }
         self.domain_keys.store(Arc::new(map));
     }
+
+    /// Registers all loaded certificates into the resolver.
+    ///
+    /// Unnamed certificates (default `fullchain.pem`) are registered for all site domains
+    /// and serve as fallback. Named certificates (e.g. `penik.ru.fullchain.pem`) are registered
+    /// strictly for site domains that share the matching apex domain name, avoiding cross-domain
+    /// certificate overwriting.
+    pub fn register_loaded_certs(&self, site_domains: &[String], certs: &[crate::acme::LoadedCert]) {
+        // 1. Default fallback certificates first
+        for cert in certs {
+            if cert.name.is_none() {
+                if let Ok(ck) = crate::tls::parse_certified_key(&cert.cert_pem, &cert.key_pem) {
+                    self.register_certified_key(site_domains, ck.clone());
+                    self.set_certified_key(ck);
+                }
+            }
+        }
+
+        // 2. Named apex certificates registered strictly to their matching domains
+        for cert in certs {
+            if let Some(apex) = &cert.name {
+                if let Ok(ck) = crate::tls::parse_certified_key(&cert.cert_pem, &cert.key_pem) {
+                    let matching: Vec<String> = site_domains
+                        .iter()
+                        .filter(|d| {
+                            let d_apex = extract_apex_domain(d);
+                            d_apex.eq_ignore_ascii_case(apex)
+                        })
+                        .cloned()
+                        .collect();
+
+                    if !matching.is_empty() {
+                        self.register_certified_key(&matching, ck.clone());
+                    } else {
+                        // Fallback: register apex and wildcard directly if not explicitly listed in site_domains
+                        let fallback_domains = vec![apex.clone(), format!("*.{}", apex)];
+                        self.register_certified_key(&fallback_domains, ck.clone());
+                    }
+
+                    if self.default_key.load().is_none() {
+                        self.set_certified_key(ck);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ResolvesServerCert for DynamicCertResolver {
@@ -103,3 +149,73 @@ impl ResolvesServerCert for DynamicCertResolver {
         self.default_key.load().as_ref().clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{CertificateParams, KeyPair};
+
+    #[test]
+    fn test_dynamic_resolver_multi_apex_isolation() {
+        let resolver = DynamicCertResolver::new(None);
+
+        // Generate self-signed cert for slavchat.ru
+        let key_slav = KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let params_slav =
+            CertificateParams::new(vec!["slavchat.ru".into(), "chat.slavchat.ru".into()]).unwrap();
+        let cert_slav = params_slav.self_signed(&key_slav).unwrap();
+
+        // Generate self-signed cert for penik.ru
+        let key_penik = KeyPair::generate_for(&rcgen::PKI_ED25519).unwrap();
+        let params_penik =
+            CertificateParams::new(vec!["penik.ru".into(), "test.dev.penik.ru".into()]).unwrap();
+        let cert_penik = params_penik.self_signed(&key_penik).unwrap();
+
+        let certs = vec![
+            crate::acme::LoadedCert {
+                name: Some("slavchat.ru".to_string()),
+                cert_pem: cert_slav.pem(),
+                key_pem: key_slav.serialize_pem(),
+            },
+            crate::acme::LoadedCert {
+                name: Some("penik.ru".to_string()),
+                cert_pem: cert_penik.pem(),
+                key_pem: key_penik.serialize_pem(),
+            },
+        ];
+
+        let site_domains = vec![
+            "chat.slavchat.ru".to_string(),
+            "test.dev.penik.ru".to_string(),
+        ];
+
+        resolver.register_loaded_certs(&site_domains, &certs);
+
+        let keys = resolver.domain_keys.load();
+        let key_for_slav = keys.get("chat.slavchat.ru").expect("must have slavchat key");
+        let key_for_penik = keys.get("test.dev.penik.ru").expect("must have penik key");
+
+        // Verify that chat.slavchat.ru and test.dev.penik.ru have distinct certified keys
+        assert_ne!(
+            key_for_slav.cert.first().unwrap().as_ref(),
+            key_for_penik.cert.first().unwrap().as_ref()
+        );
+
+        // Verify that chat.slavchat.ru actually got the slavchat certificate
+        let parsed_slav_ck =
+            crate::tls::parse_certified_key(&cert_slav.pem(), &key_slav.serialize_pem()).unwrap();
+        assert_eq!(
+            key_for_slav.cert.first().unwrap().as_ref(),
+            parsed_slav_ck.cert.first().unwrap().as_ref()
+        );
+
+        // Verify that test.dev.penik.ru actually got the penik certificate
+        let parsed_penik_ck =
+            crate::tls::parse_certified_key(&cert_penik.pem(), &key_penik.serialize_pem()).unwrap();
+        assert_eq!(
+            key_for_penik.cert.first().unwrap().as_ref(),
+            parsed_penik_ck.cert.first().unwrap().as_ref()
+        );
+    }
+}
+
