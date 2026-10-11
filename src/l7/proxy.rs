@@ -1,7 +1,8 @@
-//! High-performance reverse proxy forwarder with WebSocket tunneling.
+//! High-performance reverse proxy forwarder with WebSocket tunneling and HTTPS upstream support.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt};
@@ -10,15 +11,22 @@ use hyper::{
     Request, Response, StatusCode,
 };
 use hyper_util::rt::TokioIo;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
 use tracing::error;
 
 use crate::caddyfile::model::{HeaderOp, Upstream};
+use crate::caddyfile::placeholders::{replace_placeholders, PlaceholderContext};
 
 enum TransportStream {
     Tcp(TcpStream),
     Unix(UnixStream),
+    Tls(TlsStream<TcpStream>),
 }
 
 impl AsyncRead for TransportStream {
@@ -30,6 +38,7 @@ impl AsyncRead for TransportStream {
         match self.get_mut() {
             TransportStream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             TransportStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
+            TransportStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -43,6 +52,7 @@ impl AsyncWrite for TransportStream {
         match self.get_mut() {
             TransportStream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             TransportStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
+            TransportStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -50,6 +60,7 @@ impl AsyncWrite for TransportStream {
         match self.get_mut() {
             TransportStream::Tcp(s) => Pin::new(s).poll_flush(cx),
             TransportStream::Unix(s) => Pin::new(s).poll_flush(cx),
+            TransportStream::Tls(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -57,11 +68,57 @@ impl AsyncWrite for TransportStream {
         match self.get_mut() {
             TransportStream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
             TransportStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
+            TransportStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
 
-/// Forwards an HTTP request to an upstream target, supporting WebSockets and proxy headers.
+/// No-op server certificate verifier for loopback tls_insecure_skip_verify.
+#[derive(Debug)]
+struct NoVerifyServerCert;
+
+impl ServerCertVerifier for NoVerifyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256,
+        ]
+    }
+}
+
+/// Forwards an HTTP request to the designated upstream with header operations and WebSocket upgrade support.
 pub async fn forward_request(
     mut req: Request<hyper::body::Incoming>,
     upstream: &Upstream,
@@ -69,34 +126,21 @@ pub async fn forward_request(
     header_ops_up: &[HeaderOp],
     header_ops_down: &[HeaderOp],
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let mut host_header = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    // HTTP/2 downstream requests carry the authority in :authority rather
-    // than a Host header; hyper may leave the header map empty, so fall back
-    // to the URI authority before normalizing to origin-form.
-    if host_header.is_empty() {
-        if let Some(auth) = req.uri().authority() {
-            host_header = auth.as_str().to_string();
-        }
-    }
-
-    // Detect if this is a WebSocket upgrade request
     let is_upgrade = req
         .headers()
         .get(header::CONNECTION)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_ascii_lowercase().contains("upgrade"))
+        .map(|v| v.to_ascii_lowercase().contains("upgrade"))
         .unwrap_or(false);
 
-    // Normalize the request target to origin-form (path + query) and ensure
-    // a Host header is present, matching Caddy reverse_proxy semantics.
-    // Downstream HTTP/2 requests arrive with an absolute-form URI and the
-    // authority living in :authority; the hyper HTTP/1 upstream client would
-    // otherwise emit a proxy-form request line with no Host header, which
+    let host_header = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    // In HTTP/1.1 forward proxies or HTTP/2 downstreams, the URI can be absolute;
     // strict upstreams reject with 400.
     let path_and_query = req
         .uri()
@@ -106,6 +150,16 @@ pub async fn forward_request(
     if let Ok(origin_uri) = path_and_query.parse::<hyper::Uri>() {
         *req.uri_mut() = origin_uri;
     }
+
+    let method_str = req.method().as_str().to_string();
+    let path_str = req.uri().path().to_string();
+    let placeholder_ctx = PlaceholderContext::new(
+        &method_str,
+        &path_str,
+        &host_header,
+        peer_addr,
+        req.headers(),
+    );
 
     // Inject standard reverse proxy headers
     let headers = req.headers_mut();
@@ -133,16 +187,18 @@ pub async fn forward_request(
         );
     }
 
-    // Apply custom header_up operations
+    // Apply custom header_up operations with placeholder substitution
     for op in header_ops_up {
         match op {
             HeaderOp::Set(k, v) => {
-                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                let expanded = replace_placeholders(v, &placeholder_ctx).unwrap_or_else(|_| v.clone());
+                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&expanded)) {
                     headers.insert(name, val);
                 }
             }
             HeaderOp::Add(k, v) => {
-                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                let expanded = replace_placeholders(v, &placeholder_ctx).unwrap_or_else(|_| v.clone());
+                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&expanded)) {
                     headers.append(name, val);
                 }
             }
@@ -179,6 +235,62 @@ pub async fn forward_request(
                     .unwrap());
             }
         },
+        Upstream::Tls(tls_cfg) => {
+            // TCP connect to destination
+            let tcp_stream = match TcpStream::connect(&tls_cfg.addr).await {
+                Ok(s) => {
+                    let _ = s.set_nodelay(true);
+                    s
+                }
+                Err(e) => {
+                    error!(upstream = %tls_cfg.addr, error = %e, "failed to connect to TLS upstream TCP socket");
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(crate::l7::full_box(Bytes::from("502 Bad Gateway: TLS upstream connect failed")))
+                        .unwrap());
+                }
+            };
+
+            // Setup TLS client config
+            let client_config = if tls_cfg.insecure {
+                ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(NoVerifyServerCert))
+                    .with_no_client_auth()
+            } else {
+                let mut root_store = rustls::RootCertStore::empty();
+                let native_certs = rustls_native_certs::load_native_certs();
+                for cert in native_certs.certs {
+                    let _ = root_store.add(cert);
+                }
+                ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth()
+            };
+
+            let connector = TlsConnector::from(Arc::new(client_config));
+            let server_name = match ServerName::try_from(tls_cfg.sni.clone()) {
+                Ok(name) => name,
+                Err(_) => {
+                    error!(sni = %tls_cfg.sni, "invalid SNI for TLS upstream");
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(crate::l7::full_box(Bytes::from("502 Bad Gateway: invalid upstream SNI")))
+                        .unwrap());
+                }
+            };
+
+            match connector.connect(server_name, tcp_stream).await {
+                Ok(tls_stream) => TransportStream::Tls(tls_stream),
+                Err(e) => {
+                    error!(upstream = %tls_cfg.addr, sni = %tls_cfg.sni, error = %e, "TLS handshake with upstream failed");
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(crate::l7::full_box(Bytes::from("502 Bad Gateway: upstream TLS handshake failed")))
+                        .unwrap());
+                }
+            }
+        }
     };
 
     let io = TokioIo::new(transport);
@@ -229,16 +341,22 @@ pub async fn forward_request(
     let resp = sender.send_request(req).await?;
     let (mut parts, body) = resp.into_parts();
 
-    // Apply custom header_down operations
+    // Build context with upstream response headers for header_down placeholder expansions
+    let resp_headers = parts.headers.clone();
+    let resp_ctx = placeholder_ctx.with_upstream_headers(&resp_headers);
+
+    // Apply custom header_down operations with placeholder substitution
     for op in header_ops_down {
         match op {
             HeaderOp::Set(k, v) => {
-                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                let expanded = replace_placeholders(v, &resp_ctx).unwrap_or_else(|_| v.clone());
+                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&expanded)) {
                     parts.headers.insert(name, val);
                 }
             }
             HeaderOp::Add(k, v) => {
-                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                let expanded = replace_placeholders(v, &resp_ctx).unwrap_or_else(|_| v.clone());
+                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&expanded)) {
                     parts.headers.append(name, val);
                 }
             }

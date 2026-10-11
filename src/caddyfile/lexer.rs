@@ -45,7 +45,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
 
         // Handle comments: # or //
         if ch == '#' || (ch == '/' && chars.clone().nth(1) == Some('/')) {
-            // Consume until newline
             while let Some(&c) = chars.peek() {
                 if c == '\n' {
                     break;
@@ -53,19 +52,6 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
                 chars.next();
                 col += 1;
             }
-            continue;
-        }
-
-        // Handle single character delimiters { and }
-        if ch == '{' || ch == '}' {
-            let token_col = col;
-            chars.next();
-            col += 1;
-            tokens.push(Token {
-                text: ch.to_string(),
-                line,
-                col: token_col,
-            });
             continue;
         }
 
@@ -131,25 +117,80 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LexerError> {
             continue;
         }
 
-        // Handle bare token / identifier
+        // Block delimiters '{' and '}' vs placeholders '{name}'
+        if ch == '{' || ch == '}' {
+            // Check if this is a placeholder like '{host}' or a standalone block brace '{'
+            let mut clone_chars = chars.clone();
+            clone_chars.next(); // skip current brace
+            let next_char = clone_chars.next();
+
+            // If it's '}' or followed by whitespace/EOF, it's a block delimiter
+            let is_block_delimiter = ch == '}' || match next_char {
+                None => true,
+                Some(c) => c.is_whitespace() || c == '{' || c == '}',
+            };
+
+            if is_block_delimiter {
+                let token_col = col;
+                chars.next();
+                col += 1;
+                tokens.push(Token {
+                    text: ch.to_string(),
+                    line,
+                    col: token_col,
+                });
+                continue;
+            }
+        }
+
+        // Handle bare token / identifier (including placeholders like `{host}`)
         let start_col = col;
         let mut token_buf = String::new();
+        let mut inside_placeholder = false;
 
         while let Some(&c) = chars.peek() {
-            if c.is_whitespace() || c == '{' || c == '}' {
+            if c.is_whitespace() {
                 break;
+            }
+            if c == '{' {
+                inside_placeholder = true;
+            } else if c == '}' {
+                if inside_placeholder {
+                    token_buf.push(c);
+                    chars.next();
+                    col += 1;
+                    inside_placeholder = false;
+                    continue;
+                } else {
+                    break;
+                }
             }
             token_buf.push(c);
             chars.next();
             col += 1;
         }
 
-        tokens.push(Token {
-            text: token_buf,
-            line,
-            col: start_col,
-        });
+        if !token_buf.is_empty() {
+            tokens.push(Token {
+                text: token_buf,
+                line,
+                col: start_col,
+            });
+        }
     }
 
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenize_placeholders_and_blocks() {
+        let input = "header_up Host {host}\nreverse_proxy {\n}\n";
+        let tokens = tokenize(input).unwrap();
+        let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["header_up", "Host", "{host}", "reverse_proxy", "{", "}"]);
+    }
 }

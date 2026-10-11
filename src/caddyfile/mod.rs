@@ -4,6 +4,7 @@ pub mod cluster;
 pub mod lexer;
 pub mod model;
 pub mod parser;
+pub mod placeholders;
 
 use std::fs;
 use std::path::Path;
@@ -11,10 +12,12 @@ use thiserror::Error;
 
 pub use cluster::{consolidate_sans, extract_apex_domain, matches_site_address};
 pub use model::{
-    Directive, FileServerConfig, HandleBlock, HeaderOp, RedirConfig, ReverseProxyConfig,
-    RewriteConfig, SiteBlock, Upstream,
+    Directive, FileServerConfig, HandleBlock, HandlePathBlock, HeaderOp, MatcherDef, MatcherRule,
+    RedirConfig, RespondConfig, ResponseHeaderConfig, ReverseProxyConfig, RewriteConfig,
+    SiteBlock, TlsUpstream, Upstream,
 };
 pub use parser::{parse_caddyfile, ParserError};
+pub use placeholders::{replace_placeholders, validate_placeholders, PlaceholderContext};
 
 /// Error loading site configuration files from directory.
 #[derive(Debug, Error)]
@@ -128,7 +131,7 @@ mod tests {
         assert_eq!(sites[0].addresses, vec!["slavchat.ru", "*.slavchat.ru"]);
         assert_eq!(sites[0].directives.len(), 2);
         assert_eq!(sites[0].directives[0], Directive::Root("/var/www/slavchat".to_string()));
-        assert_eq!(sites[0].directives[1], Directive::FileServer(FileServerConfig { browse: false }));
+        assert_eq!(sites[0].directives[1], Directive::FileServer(FileServerConfig { browse: false, hide: Vec::new() }));
     }
 
     #[test]
@@ -185,5 +188,87 @@ mod tests {
         // Exact match
         assert!(matches_site_address("slavchat.ru", "slavchat.ru"));
         assert!(matches_site_address("slavchat.ru", "SLAVCHAT.RU"));
+    }
+
+    #[test]
+    fn test_phase3_parse_directives_and_matchers() {
+        let input = r#"
+            snikket.penik.ru {
+                reverse_proxy https://127.0.0.1:8082 {
+                    transport http {
+                        tls_insecure_skip_verify
+                    }
+                    header_up Host {host}
+                    header_up X-Real-IP {client_ip}
+                    header_down +X-Served-By "Vane-Proxy"
+                }
+            }
+
+            api.penik.ru {
+                @options method OPTIONS
+                respond @options 204
+
+                handle_path /prefix/* {
+                    rewrite * /new-prefix
+                    respond "OK" 200
+                }
+
+                header Access-Control-Allow-Origin *
+                request_body {
+                    max_size 250MB
+                }
+            }
+        "#;
+
+        let sites = parse_caddyfile(input, None).expect("should parse successfully");
+        assert_eq!(sites.len(), 2);
+
+        // Site 1: TLS upstream with transport insecure
+        let snikket = &sites[0];
+        assert_eq!(snikket.addresses, vec!["snikket.penik.ru"]);
+        match &snikket.directives[0] {
+            Directive::ReverseProxy(cfg) => {
+                assert!(cfg.insecure_tls);
+                assert_eq!(cfg.upstreams.len(), 1);
+                match &cfg.upstreams[0] {
+                    Upstream::Tls(tls) => {
+                        assert_eq!(tls.addr, "127.0.0.1:8082");
+                        assert_eq!(tls.sni, "127.0.0.1");
+                        assert!(tls.insecure);
+                    }
+                    _ => panic!("expected TLS upstream"),
+                }
+            }
+            _ => panic!("expected ReverseProxy directive"),
+        }
+
+        // Site 2: Matcher, respond, handle_path, header, request_body
+        let api = &sites[1];
+        assert_eq!(api.addresses, vec!["api.penik.ru"]);
+        assert!(api.directives.iter().any(|d| matches!(d, Directive::Matcher(_))));
+        assert!(api.directives.iter().any(|d| matches!(d, Directive::Respond(_))));
+        assert!(api.directives.iter().any(|d| matches!(d, Directive::HandlePath(_))));
+        assert!(api.directives.iter().any(|d| matches!(d, Directive::ResponseHeader(_))));
+        assert!(api.directives.iter().any(|d| matches!(d, Directive::RequestBodyLimit(262144000))));
+    }
+
+    #[test]
+    fn test_phase3_insecure_tls_guard_rejects_external_hosts() {
+        let input = r#"
+            evil.com {
+                reverse_proxy https://8.8.8.8:443 {
+                    transport http {
+                        tls_insecure_skip_verify
+                    }
+                }
+            }
+        "#;
+        let err = parse_caddyfile(input, None).expect_err("should reject external insecure TLS");
+        match err {
+            ParserError::InsecureTlsNotLoopback { addr, .. } => {
+                assert_eq!(addr, "8.8.8.8:443");
+            }
+            other => panic!("expected InsecureTlsNotLoopback error, got: {:?}", other),
+        }
     }
 }

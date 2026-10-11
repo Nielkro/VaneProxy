@@ -2183,6 +2183,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "rustls-pemfile",
  "rustls-pki-types",
  "serde",

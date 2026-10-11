@@ -16,6 +16,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/caddyfile/model.rs` — AST data structures for Caddyfile site blocks, directives, upstreams, and matchers.
 - `src/caddyfile/lexer.rs` — Caddyfile tokenizer with exact line/column tracking and comment handling.
 - `src/caddyfile/parser.rs` — Fail-fast recursive descent parser for Caddyfile syntax.
+- `src/caddyfile/placeholders.rs` — Placeholder validation and runtime expansion engine (`{host}`, `{client_ip}`, `{http.request.header.*}`, etc.).
 - `src/caddyfile/cluster.rs` — Apex domain extraction, wildcard consolidation, and SNI site matching.
 - `src/acme/mod.rs` — ACME module root and lifecycle integration tests.
 - `src/acme/dns_cloudflare.rs` — Cloudflare DNS-01 API client for TXT challenge records.
