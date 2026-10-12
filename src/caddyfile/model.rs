@@ -208,4 +208,6 @@ pub enum Directive {
     HeaderUp(HeaderOp),
     /// `header_down [+|-]<name> [value]`
     HeaderDown(HeaderOp),
+    /// `encode [gzip | zstd]`
+    Encode(Vec<String>),
 }

@@ -72,6 +72,13 @@ where
 
     let method_str = req.method().as_str().to_string();
     let initial_path = req.uri().path().to_string();
+    let client_accepts_gzip = req
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|enc| enc.contains("gzip"))
+        .unwrap_or(false);
+
     let initial_ctx = PlaceholderContext::new(
         &method_str,
         &initial_path,
@@ -196,7 +203,70 @@ where
         }
     }
 
+    // 7. Gzip compression if site has `encode` directive and client accepts gzip
+    let has_encode_gzip = site.directives.iter().chain(active_directives.iter()).any(|d| match d {
+        Directive::Encode(encs) => encs.iter().any(|e| e == "gzip" || e == "zstd"),
+        _ => false,
+    });
+
+    if has_encode_gzip && client_accepts_gzip {
+        resp = maybe_compress_gzip(resp).await;
+    }
+
     Ok(resp)
+}
+
+/// Compresses a response body with gzip if content type is compressible.
+async fn maybe_compress_gzip(
+    resp: Response<BoxBody<Bytes, hyper::Error>>,
+) -> Response<BoxBody<Bytes, hyper::Error>> {
+    let (mut parts, body) = resp.into_parts();
+
+    // Do not re-compress if Content-Encoding is already present
+    if parts.headers.contains_key(header::CONTENT_ENCODING) {
+        return Response::from_parts(parts, body);
+    }
+
+    // Check Content-Type for compressible types
+    let is_compressible = parts.headers.get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| {
+            ct.starts_with("text/")
+                || ct.contains("json")
+                || ct.contains("javascript")
+                || ct.contains("xml")
+                || ct.contains("svg")
+        })
+        .unwrap_or(false);
+
+    if !is_compressible {
+        return Response::from_parts(parts, body);
+    }
+
+    // Collect body bytes and compress using flate2
+    use http_body_util::BodyExt;
+    let bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => return Response::from_parts(parts, crate::l7::empty_box()),
+    };
+
+    use std::io::Write;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(&bytes).is_err() {
+        return Response::from_parts(parts, crate::l7::full_box(bytes));
+    }
+    let compressed = match encoder.finish() {
+        Ok(c) => c,
+        Err(_) => return Response::from_parts(parts, crate::l7::full_box(bytes)),
+    };
+
+    parts.headers.insert(header::CONTENT_ENCODING, header::HeaderValue::from_static("gzip"));
+    parts.headers.insert(header::CONTENT_LENGTH, header::HeaderValue::from_str(&compressed.len().to_string()).unwrap());
+
+    Response::from_parts(parts, crate::l7::full_box(Bytes::from(compressed)))
 }
 
 /// Executes the core request handling pipeline within a set of directives.
@@ -687,5 +757,42 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_bytes, "Custom Error: 404");
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_encode_gzip() {
+        use std::io::Read;
+        use flate2::read::GzDecoder;
+
+        let caddyfile = r#"
+            example.com {
+                encode gzip
+                header Content-Type "text/html; charset=utf-8"
+                respond "<html><body>Hello Compressible World!</body></html>" 200
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let site = &sites[0];
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        // 1. Client with Accept-Encoding: gzip receives compressed body
+        let req = make_request("GET", "/", &[("accept-encoding", "gzip, deflate")]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-encoding").unwrap(), "gzip");
+
+        let compressed_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+        let mut decompressed_str = String::new();
+        decoder.read_to_string(&mut decompressed_str).unwrap();
+        assert_eq!(decompressed_str, "<html><body>Hello Compressible World!</body></html>");
+
+        // 2. Client without Accept-Encoding receives plain body
+        let req = make_request("GET", "/", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key("content-encoding"));
+        let plain_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(plain_bytes, "<html><body>Hello Compressible World!</body></html>");
     }
 }

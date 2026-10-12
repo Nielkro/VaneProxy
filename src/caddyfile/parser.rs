@@ -724,6 +724,19 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
             cursor,
             "header_down",
         )?)),
+        "encode" => {
+            let mut encodings = Vec::new();
+            while let Some(tok) = cursor.peek() {
+                if tok.text == "{" || tok.text == "}" || is_directive_keyword(&tok.text) {
+                    break;
+                }
+                encodings.push(cursor.next().unwrap().text.clone());
+            }
+            if encodings.is_empty() {
+                encodings.push("gzip".to_string());
+            }
+            Ok(Directive::Encode(encodings))
+        }
 
         unknown => Err(ParserError::UnknownDirective {
             directive: unknown.to_string(),
@@ -981,5 +994,6 @@ fn is_directive_keyword(word: &str) -> bool {
             | "request_body"
             | "header_up"
             | "header_down"
+            | "encode"
     )
 }
