@@ -5,6 +5,23 @@ use bytes::Bytes;
 use hyper::{header, Response, StatusCode};
 use tokio::fs;
 
+/// Checks whether a static file exists relative to the document root (for `file` matcher and `try_files`).
+pub fn check_file_exists(root: &Path, req_path: &str) -> bool {
+    let clean_path = req_path.trim_start_matches('/');
+    let target = root.join(clean_path);
+    if let (Ok(canon_root), Ok(canon_target)) = (root.canonicalize(), target.canonicalize()) {
+        canon_target.starts_with(&canon_root) && canon_target.exists()
+    } else {
+        // Also check if directory contains index.html
+        let index_target = target.join("index.html");
+        if let (Ok(canon_root), Ok(canon_index)) = (root.canonicalize(), index_target.canonicalize()) {
+            canon_index.starts_with(&canon_root) && canon_index.exists()
+        } else {
+            false
+        }
+    }
+}
+
 /// Attempts to serve a static file from the document root.
 ///
 /// Returns:
@@ -14,7 +31,14 @@ pub async fn serve_static_file(
     root: &Path,
     req_path: &str,
     is_head: bool,
+    hide_patterns: &[String],
 ) -> Option<Response<http_body_util::combinators::BoxBody<Bytes, hyper::Error>>> {
+    // Check hide patterns against the path
+    for pat in hide_patterns {
+        if req_path.ends_with(pat) || req_path.contains(pat) {
+            return None;
+        }
+    }
     // Sanitize path against directory traversal
     let clean_path = req_path.trim_start_matches('/');
     let target = root.join(clean_path);

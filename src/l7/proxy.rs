@@ -119,13 +119,25 @@ impl ServerCertVerifier for NoVerifyServerCert {
 }
 
 /// Forwards an HTTP request to the designated upstream with header operations and WebSocket upgrade support.
-pub async fn forward_request(
-    mut req: Request<hyper::body::Incoming>,
-    upstream: &Upstream,
+pub async fn forward_request<B>(
+    mut req: Request<B>,
+    proxy_cfg: &crate::caddyfile::model::ReverseProxyConfig,
     peer_addr: SocketAddr,
-    header_ops_up: &[HeaderOp],
-    header_ops_down: &[HeaderOp],
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
+where
+    B: hyper::body::Body<Data = Bytes, Error = hyper::Error> + Send + Unpin + 'static,
+{
+    let upstream = match proxy_cfg.upstreams.first() {
+        Some(u) => u,
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(crate::l7::full_box(Bytes::from("502 Bad Gateway: no upstream")))
+                .unwrap());
+        }
+    };
+    let header_ops_up = &proxy_cfg.header_up;
+    let header_ops_down = &proxy_cfg.header_down;
     let is_upgrade = req
         .headers()
         .get(header::CONNECTION)
@@ -364,6 +376,38 @@ pub async fn forward_request(
                 if let Ok(name) = HeaderName::from_bytes(k.as_bytes()) {
                     parts.headers.remove(name);
                 }
+            }
+        }
+    }
+
+    // Intercept X-Accel-Redirect if enabled
+    if proxy_cfg.intercept_accel {
+        if let Some(accel_val) = parts.headers.get("x-accel-redirect").and_then(|v| v.to_str().ok()).map(|s| s.to_string()) {
+            parts.headers.remove("x-accel-redirect");
+            let clean_accel = accel_val.trim();
+            // Validate prefix to prevent unauthorized path traversal
+            if clean_accel.starts_with(&proxy_cfg.accel_prefix) {
+                let rel_path = clean_accel.strip_prefix(&proxy_cfg.accel_prefix).unwrap_or(clean_accel);
+                if let Some(mut file_resp) = crate::l7::static_files::serve_static_file(&proxy_cfg.accel_root, rel_path, false, &[]).await {
+                    // Copy non-hop-by-hop headers from upstream response to file response
+                    for (k, v) in parts.headers.iter() {
+                        if k != header::CONTENT_LENGTH && k != header::CONTENT_TYPE {
+                            file_resp.headers_mut().insert(k.clone(), v.clone());
+                        }
+                    }
+                    return Ok(file_resp);
+                } else {
+                    return Ok(Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(crate::l7::full_box(Bytes::from("404 Accel File Not Found")))
+                        .unwrap());
+                }
+            } else {
+                tracing::warn!(accel = %clean_accel, expected_prefix = %proxy_cfg.accel_prefix, "X-Accel-Redirect path outside allowed prefix");
+                return Ok(Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(crate::l7::full_box(Bytes::from("403 Forbidden: invalid X-Accel prefix")))
+                    .unwrap());
             }
         }
     }

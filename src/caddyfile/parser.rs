@@ -180,6 +180,9 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
             let mut header_up = Vec::new();
             let mut header_down = Vec::new();
             let mut insecure_tls = false;
+            let mut intercept_accel = false;
+            let mut accel_prefix = "/static-internal".to_string();
+            let mut accel_root = PathBuf::from(".");
 
             // Collect arguments until '{' or next directive
             while let Some(arg) = cursor.peek() {
@@ -237,12 +240,60 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
                                 // Ignore flush_interval with silent acceptance (SSE streams without buffer by default)
                                 let _ = cursor.next();
                             }
+                            "handle_response" => {
+                                // handle_response [@matcher] { ... }
+                                // Specifically supports: @accel { rewrite * {rp.header.X-Accel-Redirect} } or root / accel_prefix
+                                let mut _resp_matcher = None;
+                                if let Some(m_tok) = cursor.peek() {
+                                    if m_tok.text.starts_with('@') {
+                                        _resp_matcher = Some(cursor.next().unwrap().text.clone());
+                                    }
+                                }
+                                cursor.expect("{")?;
+                                intercept_accel = true;
+                                while let Some(resp_tok) = cursor.peek() {
+                                    if resp_tok.text == "}" {
+                                        cursor.next();
+                                        break;
+                                    }
+                                    let sub_d = cursor.next().unwrap().text.clone();
+                                    match sub_d.as_str() {
+                                        "root" => {
+                                            let _ = cursor.peek().map(|t| if t.text == "*" { cursor.next(); });
+                                            if let Some(r_tok) = cursor.next() {
+                                                accel_root = PathBuf::from(r_tok.text.clone());
+                                            }
+                                        }
+                                        "rewrite" => {
+                                            // consume rewrite * {rp.header.X-Accel-Redirect} or target
+                                            while let Some(t) = cursor.peek() {
+                                                if t.text == "}" || is_directive_keyword(&t.text) {
+                                                    break;
+                                                }
+                                                let rw_arg = cursor.next().unwrap().text.clone();
+                                                if rw_arg.starts_with('/') {
+                                                    accel_prefix = rw_arg;
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            // Skip any other inner directive tokens until end of line / block
+                                            while let Some(t) = cursor.peek() {
+                                                if t.text == "}" || is_directive_keyword(&t.text) {
+                                                    break;
+                                                }
+                                                cursor.next();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             other => {
                                 return Err(ParserError::UnknownDirective {
                                     directive: other.to_string(),
                                     line: sub_tok.line,
                                     col: sub_tok.col,
-                                });
+                                    });
                             }
                         }
                     }
@@ -278,6 +329,9 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
                 header_up,
                 header_down,
                 insecure_tls,
+                intercept_accel,
+                accel_prefix,
+                accel_root,
             }))
         }
 

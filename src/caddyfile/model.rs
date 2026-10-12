@@ -49,6 +49,12 @@ pub struct ReverseProxyConfig {
     pub header_down: Vec<HeaderOp>,
     /// Whether transport block requested tls_insecure_skip_verify.
     pub insecure_tls: bool,
+    /// Whether to intercept X-Accel-Redirect response header and serve file from disk.
+    pub intercept_accel: bool,
+    /// Allowed URL prefix for X-Accel-Redirect (default "/static-internal").
+    pub accel_prefix: String,
+    /// Root directory for X-Accel-Redirect files.
+    pub accel_root: PathBuf,
 }
 
 /// Header modification operation.

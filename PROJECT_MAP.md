@@ -24,9 +24,9 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/acme/store.rs` — Certificate persistence with 0600 file permissions, X.509 notAfter expiration parsing, SAN domain coverage validation, and apex loading.
 - `src/acme/manager.rs` — High-level ACME order manager with unified multi-SAN and partitioning fallback.
 - `src/l7/mod.rs` — Layer-7 reverse proxy and static asset HTTP server engine.
-- `src/l7/proxy.rs` — Upstream HTTP reverse proxy forwarder with WebSocket upgrade support.
-- `src/l7/service.rs` — Request dispatcher handling static files, reverse proxy, rewrites, and redirects.
-- `src/l7/static_files.rs` — Static file server with traversal protection and MIME detection.
+- `src/l7/proxy.rs` — Upstream HTTP/HTTPS reverse proxy forwarder with WebSocket upgrade and X-Accel-Redirect interception.
+- `src/l7/service.rs` — Request dispatcher handling handle blocks ordering, handle_path, try_files, handle_errors, respond, request_body 413 limits, and response headers.
+- `src/l7/static_files.rs` — Static file server with traversal protection, MIME detection, hide rules, and disk existence checks.
 - `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
 - `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with apex domain grouping and hot-reloading support.
 - `src/watcher.rs` — Zero-downtime hot reload coordinator with configurable periodic renewal interval, SIGHUP, and 500ms debounce.
