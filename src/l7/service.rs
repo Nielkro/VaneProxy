@@ -101,7 +101,8 @@ where
                 return Ok(Response::builder()
                     .status(status)
                     .header(header::LOCATION, &target)
-                    .body(crate::l7::full_box(Bytes::from(format!("Redirecting to {}", target))))
+                    .header(header::CONTENT_LENGTH, "0")
+                    .body(crate::l7::empty_box())
                     .unwrap());
             }
         }
@@ -321,7 +322,27 @@ where
         req.headers(),
     );
 
-    // 3. Process respond directives
+    // 3. Process redir directives within block
+    for dir in directives {
+        if let Directive::Redir(cfg) = dir {
+            let matched = match &cfg.matcher {
+                Some(m) => evaluate_matcher_ref(m, matchers, &req, root_path.as_deref()),
+                None => true,
+            };
+            if matched {
+                let status = StatusCode::from_u16(cfg.code).unwrap_or(StatusCode::FOUND);
+                let target = replace_placeholders(&cfg.target, &placeholder_ctx).unwrap_or_else(|_| cfg.target.clone());
+                return Ok(Response::builder()
+                    .status(status)
+                    .header(header::LOCATION, &target)
+                    .header(header::CONTENT_LENGTH, "0")
+                    .body(crate::l7::empty_box())
+                    .unwrap());
+            }
+        }
+    }
+
+    // 4. Process respond directives
     for dir in directives {
         if let Directive::Respond(cfg) = dir {
             let matched = match &cfg.matcher {
@@ -960,5 +981,26 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body, "Page Not Found Custom");
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_redir_empty_body() {
+        let caddyfile = r#"
+            status.slavchat.ru {
+                redir /status/slav 302
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let site = &sites[0];
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        let req = make_request("GET", "/", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(resp.headers().get("location").unwrap(), "/status/slav");
+        assert_eq!(resp.headers().get("content-length").unwrap(), "0");
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty(), "redirect response body must be empty (0 bytes)");
     }
 }
