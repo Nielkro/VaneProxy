@@ -43,11 +43,11 @@ where
         }
     }
 
-    // 1. Check request body size limit (default 10 MB if unspecified)
+    // 1. Check request body size limit (default 250 MB if unspecified)
     let body_limit = site.directives.iter().find_map(|d| match d {
         Directive::RequestBodyLimit(lim) => Some(*lim),
         _ => None,
-    }).unwrap_or(10 * 1024 * 1024);
+    }).unwrap_or(250 * 1024 * 1024);
 
     if let Some(content_len_val) = req.headers().get(header::CONTENT_LENGTH) {
         if let Ok(len_str) = content_len_val.to_str() {

@@ -679,7 +679,7 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
         }
 
         "request_body" => {
-            let mut max_bytes = 10 * 1024 * 1024; // default 10MB
+            let mut max_bytes = 250 * 1024 * 1024; // default 250MB
             if let Some(next_tok) = cursor.peek() {
                 if next_tok.text == "{" {
                     cursor.next(); // consume '{'
