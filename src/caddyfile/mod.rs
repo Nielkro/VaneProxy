@@ -275,4 +275,34 @@ mod tests {
             other => panic!("expected InsecureTlsNotLoopback error, got: {:?}", other),
         }
     }
+
+    #[test]
+    fn test_handle_errors_with_named_matchers() {
+        let input = r#"
+            call.slavchat.ru {
+                handle_errors {
+                    root * /var/www/web-slavchat/error
+                    @404 expression {http.error.status_code} == 404
+                    rewrite @404 /404.html
+                    @5xx expression {http.error.status_code} >= 500 && {http.error.status_code} < 600
+                    rewrite @5xx /error.html
+                }
+            }
+        "#;
+        let sites = parse_caddyfile(input, None).expect("should parse handle_errors with named matchers");
+        assert_eq!(sites.len(), 1);
+        let site = &sites[0];
+        assert_eq!(site.addresses, vec!["call.slavchat.ru"]);
+        match &site.directives[0] {
+            Directive::HandleErrors(dirs) => {
+                assert_eq!(dirs.len(), 5);
+                assert!(matches!(&dirs[0], Directive::Root(p) if p == "/var/www/web-slavchat/error"));
+                assert!(matches!(&dirs[1], Directive::Matcher(m) if m.name == "404"));
+                assert!(matches!(&dirs[2], Directive::Rewrite(r) if r.matcher.as_deref() == Some("@404") && r.target == "/404.html"));
+                assert!(matches!(&dirs[3], Directive::Matcher(m) if m.name == "5xx"));
+                assert!(matches!(&dirs[4], Directive::Rewrite(r) if r.matcher.as_deref() == Some("@5xx") && r.target == "/error.html"));
+            }
+            other => panic!("expected HandleErrors directive, got: {:?}", other),
+        }
+    }
 }

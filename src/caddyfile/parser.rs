@@ -91,6 +91,10 @@ impl<'a> Cursor<'a> {
         self.tokens.get(self.pos)
     }
 
+    fn peek_nth(&self, n: usize) -> Option<&'a Token> {
+        self.tokens.get(self.pos + n)
+    }
+
     fn next(&mut self) -> Option<&'a Token> {
         let tok = self.tokens.get(self.pos);
         if tok.is_some() {
@@ -184,9 +188,9 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
             let mut accel_prefix = "/static-internal".to_string();
             let mut accel_root = PathBuf::from(".");
 
-            // Collect arguments until '{' or next directive
-            while let Some(arg) = cursor.peek() {
-                if arg.text == "{" || arg.text == "}" || is_directive_keyword(&arg.text) {
+            // Collect arguments until '{' or next directive / matcher
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 let raw_arg = cursor.next().unwrap();
@@ -363,8 +367,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
             let mut browse = false;
             let mut hide = Vec::new();
 
-            while let Some(arg) = cursor.peek() {
-                if arg.text == "{" || is_directive_keyword(&arg.text) || arg.text == "}" {
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 let token = cursor.next().unwrap();
@@ -383,8 +387,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
                         }
                         let opt = cursor.next().unwrap().text.clone();
                         if opt == "hide" {
-                            while let Some(hide_tok) = cursor.peek() {
-                                if hide_tok.text == "}" || hide_tok.text == "{" || is_directive_keyword(&hide_tok.text) {
+                            while cursor.peek().is_some() {
+                                if is_arg_boundary(cursor) {
                                     break;
                                 }
                                 hide.push(cursor.next().unwrap().text.clone());
@@ -401,8 +405,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
 
         "try_files" => {
             let mut files = Vec::new();
-            while let Some(arg) = cursor.peek() {
-                if arg.text == "{" || arg.text == "}" || is_directive_keyword(&arg.text) {
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 files.push(cursor.next().unwrap().text.clone());
@@ -419,8 +423,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
 
         "redir" => {
             let mut args = Vec::new();
-            while let Some(arg) = cursor.peek() {
-                if arg.text == "{" || arg.text == "}" || is_directive_keyword(&arg.text) {
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 args.push(cursor.next().unwrap());
@@ -497,8 +501,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
 
         "rewrite" => {
             let mut args = Vec::new();
-            while let Some(arg) = cursor.peek() {
-                if arg.text == "{" || arg.text == "}" || is_directive_keyword(&arg.text) {
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 args.push(cursor.next().unwrap().text.clone());
@@ -540,8 +544,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
         "respond" => {
             // Syntax: respond [@matcher] [body] [status_code]
             let mut args = Vec::new();
-            while let Some(arg) = cursor.peek() {
-                if arg.text == "{" || arg.text == "}" || is_directive_keyword(&arg.text) {
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 args.push(cursor.next().unwrap());
@@ -756,8 +760,8 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
         )?)),
         "encode" => {
             let mut encodings = Vec::new();
-            while let Some(tok) = cursor.peek() {
-                if tok.text == "{" || tok.text == "}" || is_directive_keyword(&tok.text) {
+            while cursor.peek().is_some() {
+                if is_arg_boundary(cursor) {
                     break;
                 }
                 encodings.push(cursor.next().unwrap().text.clone());
@@ -818,7 +822,7 @@ fn parse_matcher_rule(cursor: &mut Cursor<'_>) -> Result<MatcherRule, ParserErro
         "path" => {
             let mut paths = Vec::new();
             while let Some(tok) = cursor.peek() {
-                if tok.text == "}" || tok.text == "{" || is_matcher_keyword(&tok.text) || is_directive_keyword(&tok.text) {
+                if is_arg_boundary(cursor) || is_matcher_keyword(&tok.text) {
                     break;
                 }
                 paths.push(cursor.next().unwrap().text.clone());
@@ -840,7 +844,7 @@ fn parse_matcher_rule(cursor: &mut Cursor<'_>) -> Result<MatcherRule, ParserErro
             })?;
             // If two args, e.g. `path_regexp my_name <regex>`, pick the last one
             let final_regex = if let Some(peek_tok) = cursor.peek() {
-                if !peek_tok.text.starts_with('{') && !is_matcher_keyword(&peek_tok.text) && peek_tok.text != "}" {
+                if !peek_tok.text.starts_with('{') && !is_matcher_keyword(&peek_tok.text) && !is_arg_boundary(cursor) {
                     cursor.next().unwrap().text.clone()
                 } else {
                     regex_tok.text.clone()
@@ -853,7 +857,7 @@ fn parse_matcher_rule(cursor: &mut Cursor<'_>) -> Result<MatcherRule, ParserErro
         "method" => {
             let mut methods = Vec::new();
             while let Some(tok) = cursor.peek() {
-                if tok.text == "}" || tok.text == "{" || is_matcher_keyword(&tok.text) || is_directive_keyword(&tok.text) {
+                if is_arg_boundary(cursor) || is_matcher_keyword(&tok.text) {
                     break;
                 }
                 methods.push(cursor.next().unwrap().text.clone());
@@ -881,7 +885,7 @@ fn parse_matcher_rule(cursor: &mut Cursor<'_>) -> Result<MatcherRule, ParserErro
 
             let mut val = None;
             if let Some(tok) = cursor.peek() {
-                if tok.text != "}" && !is_matcher_keyword(&tok.text) && !is_directive_keyword(&tok.text) {
+                if !is_arg_boundary(cursor) && !is_matcher_keyword(&tok.text) {
                     val = Some(cursor.next().unwrap().text.clone());
                 }
             }
@@ -899,7 +903,7 @@ fn parse_matcher_rule(cursor: &mut Cursor<'_>) -> Result<MatcherRule, ParserErro
             //   expression {http.error.status_code} >= 500 && {http.error.status_code} < 600
             let mut expr_tokens = Vec::new();
             while let Some(tok) = cursor.peek() {
-                if tok.text == "}" || tok.text == "{" || is_matcher_keyword(&tok.text) || is_directive_keyword(&tok.text) {
+                if is_arg_boundary(cursor) || is_matcher_keyword(&tok.text) {
                     break;
                 }
                 expr_tokens.push(cursor.next().unwrap().text.clone());
@@ -1060,3 +1064,24 @@ fn is_directive_keyword(word: &str) -> bool {
             | "encode"
     )
 }
+
+fn is_matcher_definition(cursor: &Cursor<'_>) -> bool {
+    if let Some(tok) = cursor.peek() {
+        if tok.text.starts_with('@') && tok.text.len() > 1 {
+            if let Some(next) = cursor.peek_nth(1) {
+                return next.text == "{" || is_matcher_keyword(&next.text);
+            }
+        }
+    }
+    false
+}
+
+fn is_arg_boundary(cursor: &Cursor<'_>) -> bool {
+    if let Some(tok) = cursor.peek() {
+        if tok.text == "{" || tok.text == "}" || is_directive_keyword(&tok.text) || is_matcher_definition(cursor) {
+            return true;
+        }
+    }
+    false
+}
+

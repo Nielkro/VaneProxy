@@ -535,7 +535,10 @@ fn evaluate_status_matcher(
                     };
                 }
             }
+            return true;
         }
+        warn!(matcher = %named, "named matcher referenced in handle_errors but not defined");
+        return false;
     }
     true
 }
@@ -921,5 +924,41 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
         assert_eq!(resp.headers().get("x-custom-add").unwrap(), "test");
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_handle_errors_status_matchers() {
+        let caddyfile = r#"
+            example.com {
+                handle_errors {
+                    @404 expression {http.error.status_code} == 404
+                    respond @404 "Page Not Found Custom" 404
+                    @5xx expression {http.error.status_code} >= 500 && {http.error.status_code} < 600
+                    respond @5xx "Server Error Custom" 500
+                    respond @nonexistent "Should Not Match" 503
+                }
+
+                respond @trigger_500 "fail" 502
+                @trigger_500 path /fail
+                respond "Not Found" 404
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let site = &sites[0];
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        // 1. Request /fail triggers 502, handled by @5xx
+        let req = make_request("GET", "/fail", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "Server Error Custom");
+
+        // 2. Request /any triggers 404, handled by @404
+        let req = make_request("GET", "/any", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "Page Not Found Custom");
     }
 }
