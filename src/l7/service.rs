@@ -20,7 +20,7 @@ use hyper::{header, HeaderMap, Method, Request, Response, StatusCode, Uri};
 use tracing::warn;
 
 use crate::caddyfile::model::{
-    Directive, HeaderOp, MatcherDef, MatcherRule, SiteBlock,
+    Directive, HeaderOp, MatcherDef, MatcherRule, SiteBlock, StatusOp,
 };
 use crate::caddyfile::placeholders::{replace_placeholders, PlaceholderContext};
 use crate::l7::proxy::forward_request;
@@ -35,13 +35,9 @@ pub async fn handle_site_request<B>(
 where
     B: hyper::body::Body<Data = Bytes, Error = hyper::Error> + Send + Unpin + 'static,
 {
-    // Collect named matchers defined at site level
+    // Collect named matchers defined at site level and inside blocks
     let mut matchers: HashMap<String, &MatcherDef> = HashMap::new();
-    for dir in &site.directives {
-        if let Directive::Matcher(m) = dir {
-            matchers.insert(m.name.clone(), m);
-        }
-    }
+    collect_named_matchers(&site.directives, &mut matchers);
 
     // 1. Check request body size limit (default 250 MB if unspecified)
     let body_limit = site.directives.iter().find_map(|d| match d {
@@ -173,7 +169,7 @@ where
     let active_directives = chosen_directives.unwrap_or_else(|| site.directives.clone());
 
     // Execute the active block pipeline
-    let mut resp = execute_directive_pipeline(req, &active_directives, &matchers, peer_addr, &host_header).await?;
+    let mut resp = execute_directive_pipeline(req, &active_directives, &matchers, peer_addr, &host_header, top_root.as_deref()).await?;
 
     // Apply response headers defined at site or block level
     let placeholder_ctx = PlaceholderContext::new(
@@ -281,6 +277,7 @@ async fn execute_directive_pipeline<B>(
     matchers: &HashMap<String, &MatcherDef>,
     peer_addr: SocketAddr,
     host_header: &str,
+    site_root: Option<&Path>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
 where
     B: hyper::body::Body<Data = Bytes, Error = hyper::Error> + Send + Unpin + 'static,
@@ -307,11 +304,14 @@ where
         }
     }
 
-    // 2. Determine root path for static file lookups
-    let root_path = directives.iter().find_map(|d| match d {
-        Directive::Root(p) => Some(PathBuf::from(p)),
-        _ => None,
-    });
+    // 2. Determine root path for static file lookups (local block root overrides site-level root)
+    let root_path = directives
+        .iter()
+        .find_map(|d| match d {
+            Directive::Root(p) => Some(PathBuf::from(p)),
+            _ => None,
+        })
+        .or_else(|| site_root.map(PathBuf::from));
 
     let placeholder_ctx = PlaceholderContext::new(
         req.method().as_str(),
@@ -405,30 +405,47 @@ fn apply_response_headers(
     placeholder_ctx: &PlaceholderContext,
 ) {
     for dir in directives {
-        if let Directive::ResponseHeader(cfg) = dir {
-            let matched = match &cfg.matcher {
-                Some(m) => evaluate_matcher_for_response(m, matchers, resp.headers()),
-                None => true,
-            };
-            if matched {
-                match &cfg.op {
-                    HeaderOp::Set(k, v) => {
-                        let expanded = replace_placeholders(v, placeholder_ctx).unwrap_or_else(|_| v.clone());
-                        if let (Ok(name), Ok(val)) = (header::HeaderName::from_bytes(k.as_bytes()), header::HeaderValue::from_str(&expanded)) {
-                            resp.headers_mut().insert(name, val);
-                        }
-                    }
-                    HeaderOp::Add(k, v) => {
-                        let expanded = replace_placeholders(v, placeholder_ctx).unwrap_or_else(|_| v.clone());
-                        if let (Ok(name), Ok(val)) = (header::HeaderName::from_bytes(k.as_bytes()), header::HeaderValue::from_str(&expanded)) {
-                            resp.headers_mut().append(name, val);
-                        }
-                    }
-                    HeaderOp::Delete(k) => {
-                        if let Ok(name) = header::HeaderName::from_bytes(k.as_bytes()) {
-                            resp.headers_mut().remove(name);
-                        }
-                    }
+        match dir {
+            Directive::ResponseHeader(cfg) => {
+                apply_single_response_header(resp, cfg, matchers, placeholder_ctx);
+            }
+            Directive::ResponseHeaders(configs) => {
+                for cfg in configs {
+                    apply_single_response_header(resp, cfg, matchers, placeholder_ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn apply_single_response_header(
+    resp: &mut Response<BoxBody<Bytes, hyper::Error>>,
+    cfg: &crate::caddyfile::model::ResponseHeaderConfig,
+    matchers: &HashMap<String, &MatcherDef>,
+    placeholder_ctx: &PlaceholderContext,
+) {
+    let matched = match &cfg.matcher {
+        Some(m) => evaluate_matcher_for_response(m, matchers, resp.headers()),
+        None => true,
+    };
+    if matched {
+        match &cfg.op {
+            HeaderOp::Set(k, v) => {
+                let expanded = replace_placeholders(v, placeholder_ctx).unwrap_or_else(|_| v.clone());
+                if let (Ok(name), Ok(val)) = (header::HeaderName::from_bytes(k.as_bytes()), header::HeaderValue::from_str(&expanded)) {
+                    resp.headers_mut().insert(name, val);
+                }
+            }
+            HeaderOp::Add(k, v) => {
+                let expanded = replace_placeholders(v, placeholder_ctx).unwrap_or_else(|_| v.clone());
+                if let (Ok(name), Ok(val)) = (header::HeaderName::from_bytes(k.as_bytes()), header::HeaderValue::from_str(&expanded)) {
+                    resp.headers_mut().append(name, val);
+                }
+            }
+            HeaderOp::Delete(k) => {
+                if let Ok(name) = header::HeaderName::from_bytes(k.as_bytes()) {
+                    resp.headers_mut().remove(name);
                 }
             }
         }
@@ -439,14 +456,31 @@ fn apply_response_headers(
 async fn execute_handle_errors(
     directives: &[Directive],
     status_code: u16,
-    _matchers: &HashMap<String, &MatcherDef>,
+    matchers: &HashMap<String, &MatcherDef>,
     placeholder_ctx: &PlaceholderContext,
-    root_path: Option<&Path>,
+    site_root: Option<&Path>,
 ) -> Option<Response<BoxBody<Bytes, hyper::Error>>> {
     let err_ctx = placeholder_ctx.with_status_code(status_code);
+
+    // If handle_errors has its own local `root`, it overrides site_root
+    let effective_root = directives
+        .iter()
+        .find_map(|d| match d {
+            Directive::Root(p) => Some(Path::new(p)),
+            _ => None,
+        })
+        .or(site_root);
+
     for dir in directives {
         match dir {
             Directive::Respond(cfg) => {
+                let matched = match &cfg.matcher {
+                    Some(m) => evaluate_status_matcher(m, matchers, status_code),
+                    None => true,
+                };
+                if !matched {
+                    continue;
+                }
                 let status = StatusCode::from_u16(cfg.status).unwrap_or(StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
                 let body_str = match &cfg.body {
                     Some(b) => replace_placeholders(b, &err_ctx).unwrap_or_else(|_| b.clone()),
@@ -458,7 +492,14 @@ async fn execute_handle_errors(
                     .unwrap());
             }
             Directive::Rewrite(cfg) => {
-                if let Some(root) = root_path {
+                let matched = match &cfg.matcher {
+                    Some(m) => evaluate_status_matcher(m, matchers, status_code),
+                    None => true,
+                };
+                if !matched {
+                    continue;
+                }
+                if let Some(root) = effective_root {
                     let path = replace_placeholders(&cfg.target, &err_ctx).unwrap_or_else(|_| cfg.target.clone());
                     if let Some(resp) = serve_static_file(root, &path, false, &[]).await {
                         // Preserve the original error status code
@@ -472,6 +513,31 @@ async fn execute_handle_errors(
         }
     }
     None
+}
+
+/// Evaluates status code conditions in handle_errors matchers.
+fn evaluate_status_matcher(
+    matcher_str: &str,
+    matchers: &HashMap<String, &MatcherDef>,
+    status_code: u16,
+) -> bool {
+    if let Some(named) = matcher_str.strip_prefix('@') {
+        if let Some(def) = matchers.get(named) {
+            for rule in &def.matchers {
+                if let MatcherRule::StatusExpr(cond) = rule {
+                    return match cond.op {
+                        StatusOp::Eq => status_code == cond.code,
+                        StatusOp::Neq => status_code != cond.code,
+                        StatusOp::Gte => status_code >= cond.code,
+                        StatusOp::Lte => status_code <= cond.code,
+                        StatusOp::Gt => status_code > cond.code,
+                        StatusOp::Lt => status_code < cond.code,
+                    };
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Evaluates a matcher reference (e.g. `@name` or `/path/*`) against an incoming request.
@@ -618,6 +684,30 @@ fn regex_lite_match(pattern: &str, text: &str) -> Result<bool, ()> {
     }
     // Fallback simple substring
     Ok(text.contains(clean))
+}
+
+/// Recursively collects named matcher definitions from site-level and block directives.
+fn collect_named_matchers<'a>(
+    directives: &'a [Directive],
+    map: &mut HashMap<String, &'a MatcherDef>,
+) {
+    for dir in directives {
+        match dir {
+            Directive::Matcher(m) => {
+                map.insert(m.name.clone(), m);
+            }
+            Directive::Handle(h) => {
+                collect_named_matchers(&h.directives, map);
+            }
+            Directive::HandlePath(hp) => {
+                collect_named_matchers(&hp.directives, map);
+            }
+            Directive::HandleErrors(errs) => {
+                collect_named_matchers(errs, map);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -799,5 +889,37 @@ mod tests {
         assert!(!resp.headers().contains_key("content-encoding"));
         let plain_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(plain_bytes, "<html><body>Hello Compressible World!</body></html>");
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_header_block_and_expression() {
+        let caddyfile = r#"
+            example.com {
+                header {
+                    X-Frame-Options DENY
+                    -Server
+                    +X-Custom-Add "test"
+                }
+
+                @not_found {
+                    expression {http.error.status_code} == 404
+                }
+                handle_errors {
+                    respond @not_found "Not Found Page" 404
+                    respond "Server Error Page" 500
+                }
+
+                respond "OK" 200
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let site = &sites[0];
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        let req = make_request("GET", "/", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(resp.headers().get("x-custom-add").unwrap(), "test");
     }
 }

@@ -13,7 +13,7 @@ pub fn init(level: &str, access_log: bool) {
     } else {
         level
     };
-    let filter = EnvFilter::try_new(format!("penik_proxy={directive}"))
+    let filter = EnvFilter::try_new(format!("vane={directive},penik_proxy={directive}"))
         .unwrap_or_else(|_| EnvFilter::new("error"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)

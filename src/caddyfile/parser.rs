@@ -203,6 +203,11 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
                             break;
                         }
                         let sub_name = cursor.next().unwrap().text.clone();
+                        if let Some(m_name) = sub_name.strip_prefix('@') {
+                            // Local matcher definition inside reverse_proxy (e.g. @accel header X-Accel-Redirect *)
+                            let _ = parse_named_matcher(cursor, m_name, sub_tok.line, sub_tok.col)?;
+                            continue;
+                        }
                         match sub_name.as_str() {
                             "header_up" => header_up.push(parse_header_op(cursor, "header_up")?),
                             "header_down" => {
@@ -589,13 +594,38 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
         }
 
         "header" => {
-            // Syntax: header [@matcher] [+|-]Header-Name [value]
+            // Syntax:
+            //   Single: header [@matcher] [+|-]Header-Name [value]
+            //   Block:  header [@matcher] {
+            //               [+|-]Header-Name [value]
+            //               ...
+            //           }
             let mut matcher = None;
             if let Some(first) = cursor.peek() {
                 if first.text.starts_with('@') {
                     matcher = Some(cursor.next().unwrap().text.clone());
                 }
             }
+
+            if let Some(tok) = cursor.peek() {
+                if tok.text == "{" {
+                    cursor.next(); // consume '{'
+                    let mut configs = Vec::new();
+                    while let Some(sub_tok) = cursor.peek() {
+                        if sub_tok.text == "}" {
+                            cursor.next();
+                            break;
+                        }
+                        let op = parse_header_op(cursor, "header")?;
+                        configs.push(ResponseHeaderConfig {
+                            matcher: matcher.clone(),
+                            op,
+                        });
+                    }
+                    return Ok(Directive::ResponseHeaders(configs));
+                }
+            }
+
             let op = parse_header_op(cursor, "header")?;
             Ok(Directive::ResponseHeader(ResponseHeaderConfig { matcher, op }))
         }
@@ -864,22 +894,27 @@ fn parse_matcher_rule(cursor: &mut Cursor<'_>) -> Result<MatcherRule, ParserErro
         }
         "file" => Ok(MatcherRule::File),
         "expression" => {
-            // Status code expression parsing: {http.error.status_code} == 404
-            let expr = cursor.next().ok_or(ParserError::MissingArgument {
-                directive: "expression".to_string(),
-                line: rule_tok.line,
-                col: rule_tok.col,
-            })?.text.clone();
+            // Status code expression parsing:
+            //   expression {http.error.status_code} == 404
+            //   expression {http.error.status_code} >= 500 && {http.error.status_code} < 600
+            let mut expr_tokens = Vec::new();
+            while let Some(tok) = cursor.peek() {
+                if tok.text == "}" || tok.text == "{" || is_matcher_keyword(&tok.text) || is_directive_keyword(&tok.text) {
+                    break;
+                }
+                expr_tokens.push(cursor.next().unwrap().text.clone());
+            }
 
-            let (op, code_str) = if let Some(rest) = expr.strip_prefix("status_code==") {
-                (StatusOp::Eq, rest)
-            } else if let Some(rest) = expr.strip_prefix("status_code>=") {
-                (StatusOp::Gte, rest)
-            } else {
-                (StatusOp::Eq, expr.as_str())
-            };
+            if expr_tokens.is_empty() {
+                return Err(ParserError::MissingArgument {
+                    directive: "expression".to_string(),
+                    line: rule_tok.line,
+                    col: rule_tok.col,
+                });
+            }
 
-            let code = code_str.parse::<u16>().unwrap_or(404);
+            let full_expr = expr_tokens.join(" ");
+            let (op, code) = parse_status_expression(&full_expr);
             Ok(MatcherRule::StatusExpr(StatusCond { op, code }))
         }
         other => Err(ParserError::UnknownDirective {
@@ -942,6 +977,34 @@ fn parse_header_op(cursor: &mut Cursor<'_>, directive: &'static str) -> Result<H
     } else {
         Ok(HeaderOp::Set(name.to_string(), val_tok.text.clone()))
     }
+}
+
+fn parse_status_expression(expr: &str) -> (StatusOp, u16) {
+    let s = expr.trim();
+    // Try to find comparison operator: ==, !=, >=, <=, >, <
+    let (op, rest) = if let Some(idx) = s.find("==") {
+        (StatusOp::Eq, &s[idx + 2..])
+    } else if let Some(idx) = s.find("!=") {
+        (StatusOp::Neq, &s[idx + 2..])
+    } else if let Some(idx) = s.find(">=") {
+        (StatusOp::Gte, &s[idx + 2..])
+    } else if let Some(idx) = s.find("<=") {
+        (StatusOp::Lte, &s[idx + 2..])
+    } else if let Some(idx) = s.find('>') {
+        (StatusOp::Gt, &s[idx + 1..])
+    } else if let Some(idx) = s.find('<') {
+        (StatusOp::Lt, &s[idx + 1..])
+    } else {
+        (StatusOp::Eq, s)
+    };
+
+    // Extract first numeric status code token from rest
+    let code = rest
+        .split_whitespace()
+        .find_map(|tok| tok.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
+        .unwrap_or(404);
+
+    (op, code)
 }
 
 fn parse_byte_size(s: &str) -> Option<u64> {

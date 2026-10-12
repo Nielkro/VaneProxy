@@ -194,6 +194,8 @@ pub enum Directive {
     Respond(RespondConfig),
     /// `header [<matcher>] [+|-]<name> [value]`
     ResponseHeader(ResponseHeaderConfig),
+    /// Block of response headers: `header [<matcher>] { ... }`
+    ResponseHeaders(Vec<ResponseHeaderConfig>),
     /// `uri strip_prefix <prefix>`
     UriStripPrefix(String),
     /// `handle [<matcher>] { ... }`

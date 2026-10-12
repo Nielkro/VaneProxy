@@ -62,18 +62,22 @@ pub fn load_sites_dir(dir: &Path) -> Result<Vec<SiteBlock>, SiteLoadError> {
     files.sort();
 
     for file_path in files {
-        let content = fs::read_to_string(&file_path).map_err(|e| SiteLoadError::Io {
-            path: file_path.display().to_string(),
-            source: e,
-        })?;
+        let content = match fs::read_to_string(&file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(path = %file_path.display(), error = %e, "failed to read site configuration file; skipping");
+                continue;
+            }
+        };
 
-        let parsed =
-            parse_caddyfile(&content, Some(&file_path)).map_err(|e| SiteLoadError::Parse {
-                path: file_path.display().to_string(),
-                source: e,
-            })?;
-
-        sites.extend(parsed);
+        match parse_caddyfile(&content, Some(&file_path)) {
+            Ok(parsed) => {
+                sites.extend(parsed);
+            }
+            Err(e) => {
+                tracing::error!(path = %file_path.display(), error = %e, "syntax error in site configuration; skipping invalid site file");
+            }
+        }
     }
 
     Ok(sites)
