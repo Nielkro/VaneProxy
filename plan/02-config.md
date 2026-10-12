@@ -32,24 +32,24 @@ default_backend = "caddy"
 
 [[routes]]
 # точное совпадение, case-insensitive
-sni = "studio.iuharin.ru"
+sni = "xray.example.com"
 backend = "xray"
 
 [[routes]]
-sni = "dmitryme.home.kg"
+sni = "reality.example.com"
 backend = "xray"
 
 [[routes]]
-sni = "penik.ru"
+sni = "example.com"
 backend = "caddy"
 
 [[routes]]
-sni = "slavchat.ru"
+sni = "example.org"
 backend = "caddy"
 
 # Опционально позже:
 # [[routes]]
-# sni = "*.penik.ru"   # wildcard, матчится после exact
+# sni = "*.example.com"   # wildcard, матчится после exact
 # backend = "caddy"
 ```
 

@@ -986,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatcher_redir_empty_body() {
         let caddyfile = r#"
-            status.slavchat.ru {
+            status.example.com {
                 redir /status/slav 302
             }
         "#;

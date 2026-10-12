@@ -280,14 +280,14 @@ addr = "127.0.0.1:8444"
 send_proxy_protocol = true
 
 [[routes]]
-sni = "studio.iuharin.ru"
+sni = "xray.example.com"
 backend = "xray"
 "#;
 
     #[test]
     fn parses_minimal() {
         let cfg = Config::parse(BASE).unwrap();
-        assert_eq!(cfg.route(Some("studio.iuharin.ru")), "xray");
+        assert_eq!(cfg.route(Some("xray.example.com")), "xray");
         assert_eq!(cfg.route(Some("unknown.example.com")), "caddy");
         assert_eq!(cfg.route(None), "caddy");
         assert!(cfg.backend("caddy").send_proxy_protocol);
@@ -297,7 +297,7 @@ backend = "xray"
     #[test]
     fn rejects_duplicate_sni_after_fold() {
         let text =
-            format!("{BASE}\n[[routes]]\nsni = \"STUDIO.iuharin.ru.\"\nbackend = \"xray\"\n");
+            format!("{BASE}\n[[routes]]\nsni = \"XRAY.example.com.\"\nbackend = \"xray\"\n");
         assert!(Config::parse(&text).is_err());
     }
 

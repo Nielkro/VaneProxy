@@ -49,8 +49,8 @@ mod tests {
     fn test_cert_validity_and_domain_coverage() {
         let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let mut params = rcgen::CertificateParams::new(vec![
-            "api.slavchat.ru".into(),
-            "*.penik.ru".into(),
+            "api.example.org".into(),
+            "*.example.com".into(),
         ])
         .unwrap();
         // Set explicit validity window (2025 to 2027)
@@ -66,15 +66,15 @@ mod tests {
         assert!(!CertStore::is_cert_pem_valid(&cert_pem, 5 * 365 * 86400));
 
         // 3. Domain coverage check
-        assert!(CertStore::cert_pem_covers_domain(&cert_pem, "api.slavchat.ru", 0));
-        assert!(CertStore::cert_pem_covers_domain(&cert_pem, "test.penik.ru", 0));
+        assert!(CertStore::cert_pem_covers_domain(&cert_pem, "api.example.org", 0));
+        assert!(CertStore::cert_pem_covers_domain(&cert_pem, "test.example.com", 0));
         assert!(!CertStore::cert_pem_covers_domain(&cert_pem, "unrelated.org", 0));
     }
 
     #[test]
     fn test_alpn_challenge_registration_and_retrieval() {
         let registry = AlpnChallengeRegistry::new();
-        let domain = "test.slavchat.ru";
+        let domain = "test.example.org";
         let key_auth = "token123.thumbprint456";
 
         registry

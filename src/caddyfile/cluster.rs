@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Extracts the apex (registrable) domain from a fully-qualified domain name.
 ///
-/// Handles common two-part public suffixes (e.g., `.home.kg`, `.co.uk`)
+/// Handles common two-part public suffixes (e.g., `.co.uk`, `.com.ru`)
 /// and standard single-part TLDs (e.g., `.ru`, `.com`, `.org`).
 pub fn extract_apex_domain(domain: &str) -> String {
     let clean = domain.trim().trim_start_matches("*.").trim_end_matches('.');
@@ -14,13 +14,12 @@ pub fn extract_apex_domain(domain: &str) -> String {
         return clean.to_lowercase();
     }
 
-    // Check for well-known two-part suffixes (e.g., .home.kg, .co.uk, .com.ru)
+    // Check for well-known two-part suffixes (e.g., .co.uk, .com.ru)
     let len = parts.len();
     let last_two = format!("{}.{}", parts[len - 2], parts[len - 1]).to_lowercase();
     let is_two_part_tld = matches!(
         last_two.as_str(),
-        "home.kg"
-            | "co.uk"
+        "co.uk"
             | "org.uk"
             | "me.uk"
             | "com.ru"
@@ -70,8 +69,8 @@ pub fn consolidate_sans(domains: &[String]) -> Vec<String> {
         }
 
         // RFC 6125 §6.4.3: Wildcards (*.domain.com) only match a single level.
-        // For nested subdomains (e.g. met.home.slavchat.ru), *.slavchat.ru DOES NOT MATCH.
-        // Include both the exact domain and the sub-wildcard (*.home.slavchat.ru).
+        // For nested subdomains (e.g. met.sub.example.com), *.example.com DOES NOT MATCH.
+        // Include the sub-wildcard (*.sub.example.com).
         for domain in group {
             let clean = domain.trim_start_matches("*.");
             if clean != apex {
@@ -81,13 +80,34 @@ pub fn consolidate_sans(domains: &[String]) -> Vec<String> {
                         consolidated.insert(format!("*.{}", parent));
                     }
                 }
-                // Always preserve the exact domain if explicitly requested or nested
                 if !domain.starts_with("*.") {
                     consolidated.insert(domain.clone());
                 }
             }
         }
     }
+
+    // Deduplicate exact domains covered by a wildcard in the same order.
+    // Let's Encrypt rejects orders with malformed error if an exact domain is redundant
+    // with a wildcard in the same certificate request (e.g. groups.chat.example.com with *.chat.example.com).
+    let wildcards: BTreeSet<String> = consolidated
+        .iter()
+        .filter_map(|d| d.strip_prefix("*.").map(|s| s.to_string()))
+        .collect();
+
+    consolidated.retain(|d| {
+        if d.starts_with("*.") {
+            return true;
+        }
+        // Match wildcard coverage: *.parent covers label.parent (single level).
+        // Apex domains (e.g. example.com) have parent 'com' which is not in wildcards, so they are kept.
+        if let Some((_label, parent)) = d.split_once('.') {
+            if wildcards.contains(parent) {
+                return false;
+            }
+        }
+        true
+    });
 
     consolidated.into_iter().collect()
 }

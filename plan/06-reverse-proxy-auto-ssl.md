@@ -51,9 +51,9 @@ When enabled, all requests on `:80` receive an immediate `301 Moved Permanently`
 Let's Encrypt permits up to **100 Subject Alternative Names (SANs)** per single certificate (per Let's Encrypt Certificate Limits specification).
 
 1. **Domain Extraction**: On startup and reload, PenikProxy scans all sites in `sites-enabled/`.
-2. **Clustering**: For each site, extracts the fully-qualified domain name (FQDN), groups by apex domain (e.g., `slavchat.ru`, `penik.ru`), and generates wildcard pairs:
-   - Group 1: `slavchat.ru` and `*.slavchat.ru`
-   - Group 2: `penik.ru` and `*.penik.ru`
+2. **Clustering**: For each site, extracts the fully-qualified domain name (FQDN), groups by apex domain (e.g., `example.org`, `example.com`), and generates wildcard pairs:
+   - Group 1: `example.org` and `*.example.org`
+   - Group 2: `example.com` and `*.example.com`
 3. **Consolidation**: Consolidates all groups into **one unified multi-SAN certificate order** if total SAN count $\le 100$.
 4. **Instant Subdomains**: Any new subdomain added in `sites-enabled/` matching an existing wildcard is immediately valid without requesting a new certificate.
 
@@ -66,7 +66,7 @@ Within a multi-SAN ACME order (RFC 8555), Let's Encrypt generates one authorizat
 *Risk*: In a single multi-SAN order, if one domain fails verification (e.g. DNS propagation timeout or misconfigured zone), Let's Encrypt fails the entire order.
 *Mitigation*:
 - **Pre-flight DNS Check**: Before submitting the ACME challenge response, PenikProxy verifies TXT propagation locally against public DNS resolvers (`1.1.1.1`, `8.8.8.8`).
-- **Partitioning Fallback**: If a consolidated order fails authorization, the engine automatically partitions the order into **per-apex certificates** (`slavchat.ru` + `*.slavchat.ru` as Order A, `penik.ru` + `*.penik.ru` as Order B). A failure in one apex domain does not block issuance for other domains.
+- **Partitioning Fallback**: If a consolidated order fails authorization, the engine automatically partitions the order into **per-apex certificates** (`example.org` + `*.example.org` as Order A, `example.com` + `*.example.com` as Order B). A failure in one apex domain does not block issuance for other domains.
 
 ### 3.4 ACME Provider, Staging & Security
 - **Cloudflare Limitation**: DNS-01 automation currently requires domains to be managed on Cloudflare. This limitation is explicitly documented.
@@ -101,11 +101,11 @@ To prevent silent misconfigurations, **any unknown directive, unclosed block, or
 
 #### Example 1: Reverse Proxy with Unix Socket & TCP Upstreams
 ```caddyfile
-ad1.slavchat.ru {
+ad1.example.org {
     reverse_proxy 127.0.0.1:3001
 }
 
-ad2.slavchat.ru {
+ad2.example.org {
     # Supports both Caddy unix// and URI unix:/// format
     reverse_proxy unix//run/chat/ad2.sock
 }
@@ -113,8 +113,8 @@ ad2.slavchat.ru {
 
 #### Example 2: Static File Server
 ```caddyfile
-slavchat.ru {
-    root * /var/www/slavchat
+example.org {
+    root * /var/www/example
     file_server
 }
 ```
@@ -122,9 +122,8 @@ slavchat.ru {
 #### Example 3: Static Files with Reverse Proxy Fallback (SPA / API)
 In Caddy semantics, `file_server` alone emits 404 for missing files. To properly fall back to a proxy, PenikProxy uses `handle` or `try_files`:
 ```caddyfile
-penik.ru {
-    root * /var/www/penik
-
+example.com {
+    root * /var/www/example
     # Route requests matching static files to file_server; everything else to backend
     @static file
     handle @static {
@@ -215,7 +214,7 @@ Each stage within Phase 2 includes parallel unit/integration tests with explicit
 - **Parallel Tests**:
   - Unit tests for tokenizer (comments, quoted strings, block nesting).
   - Validation test: unknown directive fails with exact line number.
-  - Clustering test: `[ad1.slavchat.ru, ad2.slavchat.ru, slavchat.ru, ad1.penik.ru]` correctly clusters into `[slavchat.ru, *.slavchat.ru, penik.ru, *.penik.ru]`.
+  - Clustering test: `[ad1.example.org, ad2.example.org, example.org, ad1.example.com]` correctly clusters into `[example.org, *.example.org, example.com, *.example.com]`.
 - **DoD**: All unit tests pass; CLI command `--validate-sites` validates `sites-enabled/`.
 
 ### Stage 2: Native ACME Engine (DNS-01 & TLS-ALPN-01)

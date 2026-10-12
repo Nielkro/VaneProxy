@@ -90,13 +90,13 @@ mod tests {
     #[test]
     fn test_parse_single_reverse_proxy() {
         let input = r#"
-            ad1.slavchat.ru {
+            ad1.example.org {
                 reverse_proxy 127.0.0.1:3001
             }
         "#;
         let sites = parse_caddyfile(input, None).expect("should parse");
         assert_eq!(sites.len(), 1);
-        assert_eq!(sites[0].addresses, vec!["ad1.slavchat.ru"]);
+        assert_eq!(sites[0].addresses, vec!["ad1.example.org"]);
         match &sites[0].directives[0] {
             Directive::ReverseProxy(cfg) => {
                 assert_eq!(cfg.upstreams, vec![Upstream::Tcp("127.0.0.1:3001".to_string())]);
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn test_parse_unix_socket_upstream() {
         let input = r#"
-            chat.penik.ru {
+            chat.example.com {
                 reverse_proxy unix//run/chat.sock
             }
         "#;
@@ -125,16 +125,16 @@ mod tests {
     fn test_parse_multi_domain_and_comments() {
         let input = r#"
             # Global comment
-            slavchat.ru, *.slavchat.ru {
+            example.org, *.example.org {
                 // Inline comment
-                root * /var/www/slavchat
+                root * /var/www/example
                 file_server
             }
         "#;
         let sites = parse_caddyfile(input, None).expect("should parse");
-        assert_eq!(sites[0].addresses, vec!["slavchat.ru", "*.slavchat.ru"]);
+        assert_eq!(sites[0].addresses, vec!["example.org", "*.example.org"]);
         assert_eq!(sites[0].directives.len(), 2);
-        assert_eq!(sites[0].directives[0], Directive::Root("/var/www/slavchat".to_string()));
+        assert_eq!(sites[0].directives[0], Directive::Root("/var/www/example".to_string()));
         assert_eq!(sites[0].directives[1], Directive::FileServer(FileServerConfig { browse: false, hide: Vec::new() }));
     }
 
@@ -158,46 +158,64 @@ mod tests {
     #[test]
     fn test_domain_clustering_and_consolidation() {
         let domains = vec![
-            "ad1.slavchat.ru".to_string(),
-            "ad2.slavchat.ru".to_string(),
-            "slavchat.ru".to_string(),
-            "ad1.penik.ru".to_string(),
-            "met.home.slavchat.ru".to_string(),
+            "ad1.example.org".to_string(),
+            "ad2.example.org".to_string(),
+            "example.org".to_string(),
+            "ad1.example.com".to_string(),
+            "met.sub.example.org".to_string(),
         ];
         let sans = consolidate_sans(&domains);
         assert_eq!(
             sans,
             vec![
-                "*.home.slavchat.ru",
-                "*.penik.ru",
-                "*.slavchat.ru",
-                "ad1.penik.ru",
-                "ad1.slavchat.ru",
-                "ad2.slavchat.ru",
-                "met.home.slavchat.ru",
-                "penik.ru",
-                "slavchat.ru"
+                "*.example.com",
+                "*.example.org",
+                "*.sub.example.org",
+                "example.com",
+                "example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_consolidate_sans_omits_exact_covered_by_wildcard() {
+        let domains = vec![
+            "example.com".to_string(),
+            "api.example.com".to_string(),
+            "chat.example.com".to_string(),
+            "groups.chat.example.com".to_string(),
+            "share.chat.example.com".to_string(),
+            "sub2.pnc.example.com".to_string(),
+        ];
+        let sans = consolidate_sans(&domains);
+        assert_eq!(
+            sans,
+            vec![
+                "*.chat.example.com",
+                "*.example.com",
+                "*.pnc.example.com",
+                "example.com",
             ]
         );
     }
 
     #[test]
     fn test_wildcard_matching() {
-        assert!(matches_site_address("*.slavchat.ru", "ad1.slavchat.ru"));
-        assert!(matches_site_address("*.slavchat.ru", "chat.slavchat.ru"));
+        assert!(matches_site_address("*.example.org", "ad1.example.org"));
+        assert!(matches_site_address("*.example.org", "chat.example.org"));
         // Does not match root domain
-        assert!(!matches_site_address("*.slavchat.ru", "slavchat.ru"));
+        assert!(!matches_site_address("*.example.org", "example.org"));
         // Does not match multi-level subdomain
-        assert!(!matches_site_address("*.slavchat.ru", "deep.sub.slavchat.ru"));
+        assert!(!matches_site_address("*.example.org", "deep.sub.example.org"));
         // Exact match
-        assert!(matches_site_address("slavchat.ru", "slavchat.ru"));
-        assert!(matches_site_address("slavchat.ru", "SLAVCHAT.RU"));
+        assert!(matches_site_address("example.org", "example.org"));
+        assert!(matches_site_address("example.org", "EXAMPLE.ORG"));
     }
 
     #[test]
     fn test_phase3_parse_directives_and_matchers() {
         let input = r#"
-            snikket.penik.ru {
+            chat.example.com {
                 reverse_proxy https://127.0.0.1:8082 {
                     transport http {
                         tls_insecure_skip_verify
@@ -208,7 +226,7 @@ mod tests {
                 }
             }
 
-            api.penik.ru {
+            api.example.com {
                 @options method OPTIONS
                 respond @options 204
 
@@ -228,9 +246,9 @@ mod tests {
         assert_eq!(sites.len(), 2);
 
         // Site 1: TLS upstream with transport insecure
-        let snikket = &sites[0];
-        assert_eq!(snikket.addresses, vec!["snikket.penik.ru"]);
-        match &snikket.directives[0] {
+        let chat = &sites[0];
+        assert_eq!(chat.addresses, vec!["chat.example.com"]);
+        match &chat.directives[0] {
             Directive::ReverseProxy(cfg) => {
                 assert!(cfg.insecure_tls);
                 assert_eq!(cfg.upstreams.len(), 1);
@@ -248,7 +266,7 @@ mod tests {
 
         // Site 2: Matcher, respond, handle_path, header, request_body
         let api = &sites[1];
-        assert_eq!(api.addresses, vec!["api.penik.ru"]);
+        assert_eq!(api.addresses, vec!["api.example.com"]);
         assert!(api.directives.iter().any(|d| matches!(d, Directive::Matcher(_))));
         assert!(api.directives.iter().any(|d| matches!(d, Directive::Respond(_))));
         assert!(api.directives.iter().any(|d| matches!(d, Directive::HandlePath(_))));
@@ -279,9 +297,9 @@ mod tests {
     #[test]
     fn test_handle_errors_with_named_matchers() {
         let input = r#"
-            call.slavchat.ru {
+            call.example.org {
                 handle_errors {
-                    root * /var/www/web-slavchat/error
+                    root * /var/www/error
                     @404 expression {http.error.status_code} == 404
                     rewrite @404 /404.html
                     @5xx expression {http.error.status_code} >= 500 && {http.error.status_code} < 600
@@ -292,11 +310,11 @@ mod tests {
         let sites = parse_caddyfile(input, None).expect("should parse handle_errors with named matchers");
         assert_eq!(sites.len(), 1);
         let site = &sites[0];
-        assert_eq!(site.addresses, vec!["call.slavchat.ru"]);
+        assert_eq!(site.addresses, vec!["call.example.org"]);
         match &site.directives[0] {
             Directive::HandleErrors(dirs) => {
                 assert_eq!(dirs.len(), 5);
-                assert!(matches!(&dirs[0], Directive::Root(p) if p == "/var/www/web-slavchat/error"));
+                assert!(matches!(&dirs[0], Directive::Root(p) if p == "/var/www/error"));
                 assert!(matches!(&dirs[1], Directive::Matcher(m) if m.name == "404"));
                 assert!(matches!(&dirs[2], Directive::Rewrite(r) if r.matcher.as_deref() == Some("@404") && r.target == "/404.html"));
                 assert!(matches!(&dirs[3], Directive::Matcher(m) if m.name == "5xx"));

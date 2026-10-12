@@ -107,7 +107,7 @@ impl CloudflareDns {
         Err(CloudflareError::MissingToken)
     }
 
-    /// Finds the Zone ID for an apex domain (e.g. `slavchat.ru`).
+    /// Finds the Zone ID for an apex domain (e.g. `example.com`).
     pub async fn get_zone_id(&self, apex_domain: &str) -> Result<String, CloudflareError> {
         let url = format!(
             "https://api.cloudflare.com/client/v4/zones?name={}",

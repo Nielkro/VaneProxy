@@ -17,7 +17,7 @@ sites_dir = "/etc/penik-proxy/sites-enabled"
 http_listen = "0.0.0.0:80"
 
 [tls]
-email = "admin@slavchat.ru"
+email = "admin@example.com"
 storage_dir = "/var/lib/penik-proxy/certs"
 cloudflare_credentials = "/etc/penik/cloudflare.ini"
 staging = false
@@ -26,11 +26,11 @@ default_backend = "caddy"
 
 # L4 Passthrough routes (Xray / Reality - raw TCP without TLS termination)
 [[routes]]
-sni = "reality.slavchat.ru"
+sni = "reality.example.org"
 backend = "xray"
 
 [[routes]]
-sni = "reality.penik.ru"
+sni = "reality.example.com"
 backend = "xray"
 
 [backends.xray]

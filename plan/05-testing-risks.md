@@ -1,7 +1,7 @@
 # 05 — Тестирование и риски
 
 ## Тесты (cargo test)
-1. **SNI-парсер**: ClientHello с SNI `studio.iuharin.ru` / `penik.ru`, без SNI, с GREASE-extensions, с fragmented extensions, мусор (не-TLS) → `None` без паники. Отдельно: `EXAMPLE.COM.` → `example.com`, `ex\0ample.com` → `None`, >253 → `None`, punycode `xn--...` проходит как есть.
+1. **SNI-парсер**: ClientHello с SNI `xray.example.com` / `example.com`, без SNI, с GREASE-extensions, с fragmented extensions, мусор (не-TLS) → `None` без паники. Отдельно: `EXAMPLE.COM.` → `example.com`, `ex\0ample.com` → `None`, >253 → `None`, punycode `xn--...` проходит как есть.
 2. **PPv2**: IPv4 `1.2.3.4:1234 → 5.6.7.8:443` и IPv6 — побайтовое сравнение с эталоном из спеки HAProxy. Отдельно: `::ffff:1.2.3.4` после `to_canonical()` → AF_INET-кодировка.
 3. **Конфиг**: дубли SNI (`Example.com` vs `example.com.` → дубль) → ошибка; неизвестный backend в route → ошибка; `default_backend` missing → ошибка; пустой `listen` → ошибка.
 4. **Интеграция**: поднять 2 TCP-echo на `127.0.0.1:9xxx/9yyy`, прокси на `127.0.0.1:4433`, слать ClientHello с разными SNI → проверять что дошло до правильного бэкенда и что Caddy-ветка начинается с PPv2-сигнатуры.
@@ -9,9 +9,9 @@
 Ручные проверки на сервере:
 ```bash
 # SNI Xray
-openssl s_client -connect 127.0.0.1:443 -servername studio.iuharin.ru -ign_eof
+openssl s_client -connect 127.0.0.1:443 -servername xray.example.com -ign_eof
 # SNI Caddy
-curl -vk https://penik.ru --resolve penik.ru:443:127.0.0.1
+curl -vk https://example.com --resolve example.com:443:127.0.0.1
 # неизвестный SNI → должен попасть в Caddy
 openssl s_client -connect 127.0.0.1:443 -servername unknown.example.com -ign_eof
 # не-TLS → тоже в Caddy (проверить что Caddy ответил, а не дроп)

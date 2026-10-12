@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// A parsed Caddyfile site block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteBlock {
-    /// List of hostnames or addresses this site serves (e.g., `["slavchat.ru", "*.slavchat.ru"]`).
+    /// List of hostnames or addresses this site serves (e.g., `["example.com", "*.example.com"]`).
     pub addresses: Vec<String>,
     /// Block directives.
     pub directives: Vec<Directive>,
@@ -29,7 +29,7 @@ pub enum Upstream {
 /// TLS upstream target configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsUpstream {
-    /// Destination host:port for TCP connection (e.g. `127.0.0.1:8082` or `sub.pnc.penik.ru:8082`).
+    /// Destination host:port for TCP connection (e.g. `127.0.0.1:8082` or `sub.backend.example.com:8082`).
     pub addr: String,
     /// Hostname used for SNI handshake and default Host header (without port).
     pub sni: String,

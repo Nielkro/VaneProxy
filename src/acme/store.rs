@@ -357,7 +357,7 @@ impl CertStore {
 /// A certificate and private key pair loaded from disk, optionally associated with an apex or domain name.
 #[derive(Debug, Clone)]
 pub struct LoadedCert {
-    /// Apex or domain name if this is a named certificate (e.g. "penik.ru"), or None for default fullchain.pem.
+    /// Apex or domain name if this is a named certificate (e.g. "example.com"), or None for default fullchain.pem.
     pub name: Option<String>,
     pub cert_pem: String,
     pub key_pem: String,

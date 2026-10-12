@@ -18,7 +18,7 @@ sites_dir = "/etc/penik-proxy/sites-enabled"
 # http_listen = "0.0.0.0:80"
 
 [tls]
-email = "admin@slavchat.ru"
+email = "admin@example.com"
 storage_dir = "/var/lib/penik-proxy/certs"
 cloudflare_credentials = "/etc/penik/cloudflare.ini"
 # cloudflare_token = "..."
@@ -27,19 +27,19 @@ cloudflare_credentials = "/etc/penik/cloudflare.ini"
 default_backend = "caddy"
 
 [[routes]]
-sni = "studio.iuharin.ru"
+sni = "xray.example.com"
 backend = "xray"
 
 [[routes]]
-sni = "dmitryme.home.kg"
+sni = "reality.example.com"
 backend = "xray"
 
 [[routes]]
-sni = "penik.ru"
+sni = "example.com"
 backend = "caddy"
 
 [[routes]]
-sni = "slavchat.ru"
+sni = "example.org"
 backend = "caddy"
 
 [backends.xray]

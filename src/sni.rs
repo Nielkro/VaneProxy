@@ -264,8 +264,8 @@ mod tests {
 
     #[test]
     fn extracts_sni() {
-        let hello = build_hello(Some("studio.iuharin.ru"), false);
-        assert_eq!(parse_sni(&hello).as_deref(), Some("studio.iuharin.ru"));
+        let hello = build_hello(Some("xray.example.com"), false);
+        assert_eq!(parse_sni(&hello).as_deref(), Some("xray.example.com"));
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn truncated_returns_none_without_panic() {
-        let hello = build_hello(Some("penik.ru"), false);
+        let hello = build_hello(Some("example.com"), false);
         for i in 0..hello.len() {
             let _ = parse_sni(&hello[..i]);
         }

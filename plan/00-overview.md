@@ -2,8 +2,8 @@
 
 ## Цель
 Один бинарник на Rust слушает `0.0.0.0:443`, читает TLS ClientHello, достаёт SNI (extension `0x0000`), и сплайсит TCP-стрим:
-- SNI из списка Xray (`studio.iuharin.ru`, `dmitryme.home.kg`, ...) → напрямую в локальный порт Xray, **без** изменения стрима;
-- SNI сайтов (`penik.ru`, `slavchat.ru`) или неизвестен / нет SNI / не-TLS → в сконфигурированный `default_backend` (по умолчанию `127.0.0.1:8444` Caddy), **с** препендом PROXY protocol v2, чтобы бэкенд видел реальный IP.
+- SNI из списка Xray (`xray.example.com`, `reality.example.com`, ...) → напрямую в локальный порт Xray, **без** изменения стрима;
+- SNI сайтов (`example.com`, `example.org`) или неизвестен / нет SNI / не-TLS → в сконфигурированный `default_backend` (по умолчанию `127.0.0.1:8444` Caddy), **с** препендом PROXY protocol v2, чтобы бэкенд видел реальный IP.
 
 TLS **не терминируется** в Rust на Фазе 1 — только peek + `copy_bidirectional`.
 

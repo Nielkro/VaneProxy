@@ -4,7 +4,7 @@
 
 Фаза 2 (`plan/06`) дала гибрид L4/L7: на тестовом `:4443` уже едут 10 простых
 сайтов (`reverse_proxy` + `redir`), L4-сплайс Xray побайтово совпадает с
-`penik-proxy`, живая страница `stats.other.penik.ru` отдаётся побайтово
+`penik-proxy`, живая страница `stats.other.example.com` отдаётся побайтово
 идентично Caddy. За кадром найден и починен баг `Host`/origin-form
 (`src/l7/proxy.rs`, коммит `b012688`).
 
@@ -45,7 +45,7 @@
 
 Известные расхождения (фиксируем, не чиним молча):
 - **R1**: `redir / /status/slav 302` у Vane — `starts_with`, у Caddy — точное
-  совпадение пути. Для `status.slavchat.ru` приемлемо, задокументировать.
+  совпадение пути. Для `status.example.org` приемлемо, задокументировать.
 - **R2**: `flush_interval -1` (SSE): hyper и так стримит без буферизации —
   директива принимается и игнорируется с варнингом.
 - **R3**: `encode zstd`: не поддерживаем, только `gzip`. Сайты, где был
@@ -74,7 +74,7 @@ pub enum Matcher {         // NEW: именованные @матчеры и и�
     PathRegexp(String),    // \.(mp3|…)$ — через regex-крейт
     Method(String),        // OPTIONS
     Header(String, String),// X-Accel-Redirect *
-    FileCheck,             // file (для @static в vpn.penik.ru)
+    FileCheck,             // file (для @static в vpn.example.com)
     StatusExpr(StatusCond),// только status_code ==/>=/… NNN (для handle_errors)
 }
 pub enum Directive {
@@ -117,7 +117,7 @@ Fail-fast сохраняется: неизвестная директива/ма
 - `insecure=true`: кастомный `ServerCertVerifier`, возвращающий `Ok` без
   проверки. **Гард**: `insecure` разрешается только для loopback
   (`127.0.0.0/8`, `::1`, `localhost`); иначе — ошибка конфигурации.
-  `sub.penik.ru → sub.pnc.penik.ru:8082` едет с полной проверкой цепочки.
+  `sub.example.com → sub.backend.example.com:8082` едет с полной проверкой цепочки.
 - SNI берётся из `TlsUpstream.sni`; `Host` апстриму по умолчанию = SNI-хост,
   `header_up Host …` переопределяет (как требует snikket).
 - Версия upstream HTTP: только 1.1 на старте (ALPN-h2 — follow-up, не нужен
@@ -183,30 +183,30 @@ Fail-fast сохраняется: неизвестная директива/ма
 ### Этап C: TLS-апстрим
 - Тесты: e2e против локального TLS-эха (rcgen-сертификат): обычный + insecure;
   гард «insecure только loopback» (unit).
-- DoD: через `:4443` резолвятся `snikket.penik.ru` (self-signed) и
-  `sub.penik.ru` (внешний `:8082`), коды совпадают с путём через Caddy.
+- DoD: через `:4443` резолвятся `chat.example.com` (self-signed) и
+  `sub.example.com` (внешний `:8082`), коды совпадают с путём через Caddy.
 
 ### Этап D: диспетчер handle/try_files/handle_errors/handle_response
 - Тесты: порядок handle (первый матч), `handle_path`-стрип,
   `try_files → /index.html` для SPA, `handle_errors` 404/5xx со статикой,
   X-Accel-перехват (фейковый Go: заголовок → файл с диска; прямой запрос
   → 404), `@options`→204.
-- DoD: паритетная таблица (как в Фазе 2) для `keys`, `kvncdn`, `met.home`,
-  `slavcall`, `slavchat.ru`, `web.slavchat.ru`, `vpn.penik.ru`,
-  `call.slavchat.ru`, `music`, `api/web.penik.ru`, `penik.ru` — коды и тела
+- DoD: паритетная таблица (как в Фазе 2) для `keys`, `kvncdn`, `met.sub`,
+  `call1`, `example.org`, `web.example.org`, `vpn.example.com`,
+  `call.example.org`, `music`, `api/web.example.com`, `example.com` — коды и тела
   совпадают с `:443`.
 
 ### Этап E: encode gzip, `hide`, `request_body`-лимит, `header`-ответы
 - Тесты: `Content-Encoding: gzip` при `Accept-Encoding`; `hide` прячет
   `bundle.zip`; тело > лимита → 413; CORS-заголовки из `header`-блоков.
-- DoD: `api.penik.ru` (стикеры, бандлы, accel-вложения, аплоад 250 МБ)
+- DoD: `api.example.com` (стикеры, бандлы, accel-вложения, аплоад 250 МБ)
   полностью паритетичен.
 
 ### Этап F: миграционный скрипт + батчи на `:4443`
-- Батч 1 (простые + HTTPS): `snikket.*`, `sub.penik.ru` (после C).
-- Батч 2 (handle-простые): `keys`, `met.home`, `ws-relay`, `tg.other`(проверить живой ли 6781), `mp.slav` уже едет.
-- Батч 3 (статика/SPA): `slavchat.ru`, `web.slavchat.ru`, `vpn.penik.ru`, `music`, `call.slavchat.ru`.
-- Батч 4 (penik-экосистема): `penik.ru`, `web.penik.ru`, `api.penik.ru` (после E).
+- Батч 1 (простые + HTTPS): `chat.*`, `sub.example.com` (после C).
+- Батч 2 (handle-простые): `keys`, `met.sub`, `ws-relay`, `tg.other`(проверить живой ли 6781), `mp.sub` уже едет.
+- Батч 3 (статика/SPA): `example.org`, `web.example.org`, `vpn.example.com`, `music`, `call.example.org`.
+- Батч 4 (основная экосистема): `example.com`, `web.example.com`, `api.example.com` (после E).
 - Каждый батч: файлы → `SIGHUP` → паритетная таблица код/тело/заголовки
   `:4443` vs `:443` → откат удалением файла при расхождении.
 - DoD: все живые сайты резолвятся в L7 на `:4443`, мёртвые дают 502
@@ -226,7 +226,7 @@ Caddy-совместимый `encode zstd`, сложные `expression`, `on-dem
 
 ## 6. Риски
 
-- **X-Accel-Redirect** — единственный путь отдачи вложений `api.penik.ru`;
+- **X-Accel-Redirect** — единственный путь отдачи вложений `api.example.com`;
   ошибка в проверке префикса = path traversal. Митигация: строгий префикс +
   тест на `..`.
 - **`insecure` только loopback** — гард в коде + warn в лог при каждом старте.

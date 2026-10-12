@@ -62,7 +62,7 @@ impl DynamicCertResolver {
     /// Registers all loaded certificates into the resolver.
     ///
     /// Unnamed certificates (default `fullchain.pem`) are registered for all site domains
-    /// and serve as fallback. Named certificates (e.g. `penik.ru.fullchain.pem`) are registered
+    /// and serve as fallback. Named certificates (e.g. `example.com.fullchain.pem`) are registered
     /// strictly for site domains that share the matching apex domain name, avoiding cross-domain
     /// certificate overwriting.
     pub fn register_loaded_certs(&self, site_domains: &[String], certs: &[crate::acme::LoadedCert]) {
@@ -159,62 +159,62 @@ mod tests {
     fn test_dynamic_resolver_multi_apex_isolation() {
         let resolver = DynamicCertResolver::new(None);
 
-        // Generate self-signed cert for slavchat.ru
-        let key_slav = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-        let params_slav =
-            CertificateParams::new(vec!["slavchat.ru".into(), "chat.slavchat.ru".into()]).unwrap();
-        let cert_slav = params_slav.self_signed(&key_slav).unwrap();
+        // Generate self-signed cert for example.org
+        let key_org = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let params_org =
+            CertificateParams::new(vec!["example.org".into(), "chat.example.org".into()]).unwrap();
+        let cert_org = params_org.self_signed(&key_org).unwrap();
 
-        // Generate self-signed cert for penik.ru
-        let key_penik = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-        let params_penik =
-            CertificateParams::new(vec!["penik.ru".into(), "test.dev.penik.ru".into()]).unwrap();
-        let cert_penik = params_penik.self_signed(&key_penik).unwrap();
+        // Generate self-signed cert for example.com
+        let key_com = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let params_com =
+            CertificateParams::new(vec!["example.com".into(), "test.dev.example.com".into()]).unwrap();
+        let cert_com = params_com.self_signed(&key_com).unwrap();
 
         let certs = vec![
             crate::acme::LoadedCert {
-                name: Some("slavchat.ru".to_string()),
-                cert_pem: cert_slav.pem(),
-                key_pem: key_slav.serialize_pem(),
+                name: Some("example.org".to_string()),
+                cert_pem: cert_org.pem(),
+                key_pem: key_org.serialize_pem(),
             },
             crate::acme::LoadedCert {
-                name: Some("penik.ru".to_string()),
-                cert_pem: cert_penik.pem(),
-                key_pem: key_penik.serialize_pem(),
+                name: Some("example.com".to_string()),
+                cert_pem: cert_com.pem(),
+                key_pem: key_com.serialize_pem(),
             },
         ];
 
         let site_domains = vec![
-            "chat.slavchat.ru".to_string(),
-            "test.dev.penik.ru".to_string(),
+            "chat.example.org".to_string(),
+            "test.dev.example.com".to_string(),
         ];
 
         resolver.register_loaded_certs(&site_domains, &certs);
 
         let keys = resolver.domain_keys.load();
-        let key_for_slav = keys.get("chat.slavchat.ru").expect("must have slavchat key");
-        let key_for_penik = keys.get("test.dev.penik.ru").expect("must have penik key");
+        let key_for_org = keys.get("chat.example.org").expect("must have example.org key");
+        let key_for_com = keys.get("test.dev.example.com").expect("must have example.com key");
 
-        // Verify that chat.slavchat.ru and test.dev.penik.ru have distinct certified keys
+        // Verify that chat.example.org and test.dev.example.com have distinct certified keys
         assert_ne!(
-            key_for_slav.cert.first().unwrap().as_ref(),
-            key_for_penik.cert.first().unwrap().as_ref()
+            key_for_org.cert.first().unwrap().as_ref(),
+            key_for_com.cert.first().unwrap().as_ref()
         );
 
-        // Verify that chat.slavchat.ru actually got the slavchat certificate
-        let parsed_slav_ck =
-            crate::tls::parse_certified_key(&cert_slav.pem(), &key_slav.serialize_pem()).unwrap();
+        // Verify that chat.example.org actually got the example.org certificate
+        let parsed_org_ck =
+            crate::tls::parse_certified_key(&cert_org.pem(), &key_org.serialize_pem()).unwrap();
         assert_eq!(
-            key_for_slav.cert.first().unwrap().as_ref(),
-            parsed_slav_ck.cert.first().unwrap().as_ref()
+            key_for_org.cert.first().unwrap().as_ref(),
+            parsed_org_ck.cert.first().unwrap().as_ref()
         );
 
-        // Verify that test.dev.penik.ru actually got the penik certificate
-        let parsed_penik_ck =
-            crate::tls::parse_certified_key(&cert_penik.pem(), &key_penik.serialize_pem()).unwrap();
+        // Verify that test.dev.example.com actually got the example.com certificate
+        let parsed_com_ck =
+            crate::tls::parse_certified_key(&cert_com.pem(), &key_com.serialize_pem()).unwrap();
         assert_eq!(
-            key_for_penik.cert.first().unwrap().as_ref(),
-            parsed_penik_ck.cert.first().unwrap().as_ref()
+            key_for_com.cert.first().unwrap().as_ref(),
+            parsed_com_ck.cert.first().unwrap().as_ref()
         );
     }
 }

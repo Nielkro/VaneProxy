@@ -204,10 +204,10 @@ mod tests {
         headers.insert("x-custom-test", "HelloWorld".parse().unwrap());
 
         let peer: SocketAddr = "192.168.1.50:54321".parse().unwrap();
-        let ctx = PlaceholderContext::new("GET", "/api/v1/feed", "slavchat.ru", peer, &headers);
+        let ctx = PlaceholderContext::new("GET", "/api/v1/feed", "example.com", peer, &headers);
 
         let replaced = replace_placeholders("Hello {host} from {client_ip} on {method} {path}!", &ctx).unwrap();
-        assert_eq!(replaced, "Hello slavchat.ru from 192.168.1.50 on GET /api/v1/feed!");
+        assert_eq!(replaced, "Hello example.com from 192.168.1.50 on GET /api/v1/feed!");
 
         let custom_hdr = replace_placeholders("Header is {http.request.header.x-custom-test}", &ctx).unwrap();
         assert_eq!(custom_hdr, "Header is HelloWorld");
