@@ -145,12 +145,20 @@ where
         .map(|v| v.to_ascii_lowercase().contains("upgrade"))
         .unwrap_or(false);
 
-    let host_header = req
+    let mut host_header = req
         .headers()
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_default();
+    // HTTP/2 downstream requests carry the authority in :authority rather
+    // than a Host header; hyper may leave the header map empty, so fall back
+    // to the URI authority before normalizing to origin-form.
+    if host_header.is_empty() {
+        if let Some(auth) = req.uri().authority() {
+            host_header = auth.as_str().to_string();
+        }
+    }
 
     // In HTTP/1.1 forward proxies or HTTP/2 downstreams, the URI can be absolute;
     // strict upstreams reject with 400.

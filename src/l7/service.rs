@@ -63,12 +63,17 @@ where
     }
 
     // Capture initial request context details
-    let host_header = req
+    let mut host_header = req
         .headers()
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    if host_header.is_empty() {
+        if let Some(auth) = req.uri().authority() {
+            host_header = auth.as_str().to_string();
+        }
+    }
 
     let method_str = req.method().as_str().to_string();
     let initial_path = req.uri().path().to_string();
