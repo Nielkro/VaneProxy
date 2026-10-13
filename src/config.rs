@@ -51,6 +51,8 @@ pub struct TlsConf {
     pub root_ca: Option<PathBuf>,
     #[serde(default)]
     pub renewal_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub cloudflare_propagation_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,5 +356,16 @@ backend = "xray"
         let cfg = Config::parse(&text).unwrap();
         assert_eq!(cfg.route(Some("unknown.example.com")), "caddy");
         assert!(matches!(cfg.backend("caddy").addr, BackendAddr::Unix(_)));
+    }
+
+    #[test]
+    fn parses_tls_config_with_propagation_seconds() {
+        let text = format!(
+            "{BASE}\n[tls]\nemail = \"admin@example.com\"\ncloudflare_propagation_seconds = 120\n"
+        );
+        let cfg = Config::parse(&text).unwrap();
+        let tls = cfg.tls.unwrap();
+        assert_eq!(tls.email.as_deref(), Some("admin@example.com"));
+        assert_eq!(tls.cloudflare_propagation_seconds, Some(120));
     }
 }

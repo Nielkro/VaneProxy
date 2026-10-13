@@ -20,6 +20,7 @@ http_listen = "0.0.0.0:80"
 email = "admin@example.com"
 storage_dir = "/var/lib/penik-proxy/certs"
 cloudflare_credentials = "/etc/penik/cloudflare.ini"
+cloudflare_propagation_seconds = 60
 staging = false
 
 default_backend = "caddy"

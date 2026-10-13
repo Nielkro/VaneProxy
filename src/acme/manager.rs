@@ -50,6 +50,8 @@ pub struct AcmeConfig {
     pub directory_url: Option<String>,
     /// Optional custom Root CA certificate path (e.g. for Pebble minica.pem).
     pub root_ca: Option<PathBuf>,
+    /// Cloudflare DNS propagation delay in seconds (defaults to 60).
+    pub propagation_secs: u64,
 }
 
 /// Manages certificate ordering, challenge resolution, and renewals.
@@ -198,7 +200,7 @@ impl AcmeManager {
         let mut order = account.new_order(&new_order).await?;
         let mut created_cf_records: Vec<(String, String)> = Vec::new(); // (zone_id, record_id)
 
-        // Process authorizations
+        // Phase 1: Provision all challenge responses (DNS-01 TXT records or TLS-ALPN-01)
         let mut authz_iter = order.authorizations();
         while let Some(authz_res) = authz_iter.next().await {
             let mut authz = authz_res?;
@@ -215,7 +217,7 @@ impl AcmeManager {
                     ))
                 })?;
 
-                let mut challenge = authz
+                let challenge = authz
                     .challenge(ChallengeType::Dns01)
                     .ok_or_else(|| AcmeError::NoSupportedChallenge(domain.clone()))?;
 
@@ -231,11 +233,9 @@ impl AcmeManager {
                     .create_txt_record(&zone_id, &record_name, &digest_b64)
                     .await?;
                 created_cf_records.push((zone_id, record_id));
-
-                challenge.set_ready().await?;
             } else {
                 // Use TLS-ALPN-01
-                let mut challenge = authz
+                let challenge = authz
                     .challenge(ChallengeType::TlsAlpn01)
                     .ok_or_else(|| AcmeError::NoSupportedChallenge(domain.clone()))?;
 
@@ -243,24 +243,53 @@ impl AcmeManager {
                 self.alpn_registry
                     .register_challenge(&domain, key_auth.as_str())
                     .map_err(|e| AcmeError::NoSupportedChallenge(format!("ALPN registration: {e}")))?;
-
-                challenge.set_ready().await?;
             }
         }
 
-        // Wait for order to become Ready
-        let ready_status = order.poll_ready(&RetryPolicy::default()).await?;
+        // Wait once for DNS propagation across nameservers if any DNS-01 challenges were provisioned
+        if !created_cf_records.is_empty() && self.config.propagation_secs > 0 {
+            info!(
+                seconds = self.config.propagation_secs,
+                count = created_cf_records.len(),
+                "waiting for DNS propagation before notifying ACME server..."
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(self.config.propagation_secs)).await;
+        }
 
-        // Cleanup temporary records and challenges
-        for (zone_id, record_id) in created_cf_records {
+        // Phase 2: Notify ACME server that challenges are ready
+        let mut authz_iter = order.authorizations();
+        while let Some(authz_res) = authz_iter.next().await {
+            let mut authz = authz_res?;
+            let domain = authz.identifier().to_string();
+            let is_wildcard = domain.starts_with("*.");
+
+            let challenge_type = if is_wildcard || self.cf_dns.is_some() {
+                ChallengeType::Dns01
+            } else {
+                ChallengeType::TlsAlpn01
+            };
+
+            let mut challenge = authz
+                .challenge(challenge_type)
+                .ok_or_else(|| AcmeError::NoSupportedChallenge(domain.clone()))?;
+
+            challenge.set_ready().await?;
+        }
+
+        // Phase 3: Wait for order to become Ready
+        let ready_res = order.poll_ready(&RetryPolicy::default()).await;
+
+        // Cleanup temporary records and challenges regardless of outcome
+        for (zone_id, record_id) in &created_cf_records {
             if let Some(cf) = &self.cf_dns {
-                let _ = cf.delete_txt_record(&zone_id, &record_id).await;
+                let _ = cf.delete_txt_record(zone_id, record_id).await;
             }
         }
         for d in sans {
             self.alpn_registry.remove_challenge(d);
         }
 
+        let ready_status = ready_res?;
         if ready_status != OrderStatus::Ready {
             return Err(AcmeError::OrderFailed(ready_status));
         }
