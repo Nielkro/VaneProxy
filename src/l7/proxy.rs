@@ -173,6 +173,8 @@ where
 
     let method_str = req.method().as_str().to_string();
     let path_str = req.uri().path().to_string();
+    let orig_method = req.method().clone();
+    let orig_headers = req.headers().clone();
     let placeholder_ctx = PlaceholderContext::new(
         &method_str,
         &path_str,
@@ -396,7 +398,13 @@ where
             // Validate prefix to prevent unauthorized path traversal
             if clean_accel.starts_with(&proxy_cfg.accel_prefix) {
                 let rel_path = clean_accel.strip_prefix(&proxy_cfg.accel_prefix).unwrap_or(clean_accel);
-                if let Some(mut file_resp) = crate::l7::static_files::serve_static_file(&proxy_cfg.accel_root, rel_path, false, &[]).await {
+                if let Some(mut file_resp) = crate::l7::static_files::serve_static_file(
+                    &proxy_cfg.accel_root,
+                    rel_path,
+                    &orig_method,
+                    &orig_headers,
+                    &[],
+                ).await {
                     // Copy non-hop-by-hop headers from upstream response to file response
                     for (k, v) in parts.headers.iter() {
                         if k != header::CONTENT_LENGTH && k != header::CONTENT_TYPE {
