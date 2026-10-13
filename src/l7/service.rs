@@ -214,13 +214,7 @@ where
     let mut resp = execute_directive_pipeline(req, &active_directives, &matchers, peer_addr, &host_header, top_root.as_deref()).await?;
 
     // Apply response headers defined at site or block level
-    let placeholder_ctx = PlaceholderContext::new(
-        &method_str,
-        &initial_path,
-        &host_header,
-        peer_addr,
-        &HeaderMap::new(),
-    ).with_upstream_headers(resp.headers());
+    let placeholder_ctx = initial_ctx.with_upstream_headers(resp.headers());
 
     apply_response_headers(&mut resp, &site.directives, &matchers, &placeholder_ctx);
     if active_directives != site.directives {
@@ -470,14 +464,15 @@ fn apply_response_headers(
     matchers: &HashMap<String, &MatcherDef>,
     placeholder_ctx: &PlaceholderContext,
 ) {
+    let status_code = resp.status().as_u16();
     for dir in directives {
         match dir {
             Directive::ResponseHeader(cfg) => {
-                apply_single_response_header(resp, cfg, matchers, placeholder_ctx);
+                apply_single_response_header(resp, cfg, matchers, placeholder_ctx, status_code);
             }
             Directive::ResponseHeaders(configs) => {
                 for cfg in configs {
-                    apply_single_response_header(resp, cfg, matchers, placeholder_ctx);
+                    apply_single_response_header(resp, cfg, matchers, placeholder_ctx, status_code);
                 }
             }
             _ => {}
@@ -490,9 +485,10 @@ fn apply_single_response_header(
     cfg: &crate::caddyfile::model::ResponseHeaderConfig,
     matchers: &HashMap<String, &MatcherDef>,
     placeholder_ctx: &PlaceholderContext,
+    status_code: u16,
 ) {
     let matched = match &cfg.matcher {
-        Some(m) => evaluate_matcher_for_response(m, matchers, resp.headers()),
+        Some(m) => evaluate_matcher_for_response(m, matchers, resp.headers(), placeholder_ctx, status_code),
         None => true,
     };
     if matched {
@@ -625,7 +621,14 @@ fn evaluate_matcher_ref<B>(
     }
 
     // Path prefix matcher: `/api/*` or `/join`
-    let path = req.uri().path();
+    evaluate_path_matcher(matcher_str, req.uri().path())
+}
+
+/// Evaluates a path matcher string (e.g. `/api/*`, `/static`) against a path.
+fn evaluate_path_matcher(matcher_str: &str, path: &str) -> bool {
+    if matcher_str == "*" {
+        return true;
+    }
     if matcher_str.ends_with('*') {
         path.starts_with(matcher_str.trim_end_matches('*'))
     } else {
@@ -708,18 +711,65 @@ fn evaluate_matcher_def<B>(
     true
 }
 
-/// Evaluates matcher for response headers (e.g. `@matcher` checking headers).
+/// Evaluates matcher for response headers against request context and response headers.
 fn evaluate_matcher_for_response(
     matcher_str: &str,
     matchers: &HashMap<String, &MatcherDef>,
     resp_headers: &HeaderMap,
+    placeholder_ctx: &PlaceholderContext,
+    status_code: u16,
 ) -> bool {
-    if let Some(named) = matcher_str.strip_prefix('@') {
-        if let Some(def) = matchers.get(named) {
-            for rule in &def.matchers {
-                if let MatcherRule::Header { name, value, negated } = rule {
-                    let has_header = resp_headers.get(name).and_then(|v| v.to_str().ok());
-                    let matches = match (has_header, value) {
+    let m = matcher_str.trim();
+    if m == "*" {
+        return true;
+    }
+    if m.starts_with('/') {
+        return evaluate_path_matcher(m, &placeholder_ctx.path);
+    }
+    if let Some(named) = m.strip_prefix('@') {
+        let Some(def) = matchers.get(named) else {
+            warn!(matcher = %named, "named matcher not found for response header; rejecting");
+            return false;
+        };
+
+        for rule in &def.matchers {
+            match rule {
+                MatcherRule::Path(prefixes) => {
+                    let path = &placeholder_ctx.path;
+                    let any_match = prefixes.iter().any(|p| {
+                        if p.ends_with('*') {
+                            path.starts_with(p.trim_end_matches('*'))
+                        } else {
+                            path == p
+                        }
+                    });
+                    if !any_match {
+                        return false;
+                    }
+                }
+                MatcherRule::PathRegexp(pattern) => {
+                    let path = &placeholder_ctx.path;
+                    if let Ok(re) = regex_lite_match(pattern, path) {
+                        if !re {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                MatcherRule::Method(methods) => {
+                    let req_method = &placeholder_ctx.method;
+                    if !methods.iter().any(|m| m.eq_ignore_ascii_case(req_method)) {
+                        return false;
+                    }
+                }
+                MatcherRule::Header { name, value, negated } => {
+                    // Check response header first; fall back to request header
+                    let header_val = resp_headers
+                        .get(name)
+                        .or_else(|| placeholder_ctx.request_headers.get(name))
+                        .and_then(|v| v.to_str().ok());
+                    let matches = match (header_val, value) {
                         (Some(_), None) => true,
                         (Some(v), Some(expected)) => expected == "*" || v == expected,
                         (None, _) => false,
@@ -731,11 +781,30 @@ fn evaluate_matcher_for_response(
                         return false;
                     }
                 }
+                MatcherRule::StatusExpr(cond) => {
+                    let matches = match cond.op {
+                        StatusOp::Eq => status_code == cond.code,
+                        StatusOp::Neq => status_code != cond.code,
+                        StatusOp::Gt => status_code > cond.code,
+                        StatusOp::Gte => status_code >= cond.code,
+                        StatusOp::Lt => status_code < cond.code,
+                        StatusOp::Lte => status_code <= cond.code,
+                    };
+                    if !matches {
+                        return false;
+                    }
+                }
+                MatcherRule::File => {
+                    warn!(matcher = %named, "file matcher rule is unsupported in response header context; rejecting");
+                    return false;
+                }
             }
-            return true;
         }
+        return true;
     }
-    true
+
+    warn!(matcher = %matcher_str, "unsupported matcher syntax for response header; rejecting");
+    false
 }
 
 /// Evaluates simple regex patterns without pulling full heavyweight regex engine if simple.
@@ -1218,5 +1287,76 @@ mod tests {
         assert_eq!(resp_a2.status(), StatusCode::OK);
         let body_a2 = resp_a2.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_a2, "I am Site A");
+    }
+
+    #[tokio::test]
+    async fn test_response_header_matcher_path_and_revalidate() {
+        let caddyfile = r#"
+            example.com {
+                @static {
+                    path /assets/* /favicon.ico
+                }
+                @revalidate {
+                    path /index.html
+                }
+
+                header @static Cache-Control "public, max-age=31536000, immutable"
+                header @revalidate Cache-Control "no-cache"
+                header /images/* X-Asset-Category "images"
+
+                respond /assets/bundle.js "bundle content" 200
+                respond /favicon.ico "icon content" 200
+                respond /index.html "html content" 200
+                respond /images/logo.png "logo content" 200
+                respond /api/data "api content" 200
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let site = &sites[0];
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        // 1. /assets/bundle.js must match @static (immutable), NOT @revalidate (no-cache)
+        let req = make_request("GET", "/assets/bundle.js", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("cache-control").unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+
+        // 2. /favicon.ico must match @static (immutable)
+        let req = make_request("GET", "/favicon.ico", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("cache-control").unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+
+        // 3. /index.html must match @revalidate (no-cache), NOT @static
+        let req = make_request("GET", "/index.html", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("cache-control").unwrap(),
+            "no-cache"
+        );
+
+        // 4. /images/logo.png must match inline path matcher /images/*
+        let req = make_request("GET", "/images/logo.png", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-asset-category").unwrap(),
+            "images"
+        );
+        assert!(!resp.headers().contains_key("cache-control"));
+
+        // 5. /api/data must match neither @static nor @revalidate
+        let req = make_request("GET", "/api/data", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!resp.headers().contains_key("cache-control"));
+        assert!(!resp.headers().contains_key("x-asset-category"));
     }
 }

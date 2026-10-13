@@ -606,7 +606,7 @@ fn parse_directive(cursor: &mut Cursor<'_>) -> Result<Directive, ParserError> {
             //           }
             let mut matcher = None;
             if let Some(first) = cursor.peek() {
-                if first.text.starts_with('@') {
+                if first.text.starts_with('@') || first.text.starts_with('/') {
                     matcher = Some(cursor.next().unwrap().text.clone());
                 }
             }
