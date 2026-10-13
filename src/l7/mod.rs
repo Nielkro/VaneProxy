@@ -13,19 +13,31 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::error;
 
 use crate::caddyfile::model::SiteBlock;
-use crate::l7::service::handle_site_request;
+pub use service::{extract_request_host, handle_site_request, resolve_site_for_request};
 
 /// Serves an established decrypted TLS stream as an HTTP/1.1 or HTTP/2 connection.
-pub async fn serve_l7_stream<S>(stream: S, site: Arc<SiteBlock>, peer_addr: SocketAddr)
-where
+///
+/// Dispatches each request to the matching SiteBlock based on the request's `Host` / `:authority` header,
+/// preventing cross-talk and connection coalescing conflicts across multi-SAN HTTP/2 sessions.
+pub async fn serve_l7_stream<S>(
+    stream: S,
+    sites: Arc<Vec<SiteBlock>>,
+    default_site: Arc<SiteBlock>,
+    peer_addr: SocketAddr,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let io = TokioIo::new(stream);
     let builder = Builder::new(TokioExecutor::new());
 
     let service = service_fn(move |req| {
-        let site_ref = Arc::clone(&site);
-        async move { handle_site_request(req, &site_ref, peer_addr).await }
+        let sites_ref = Arc::clone(&sites);
+        let default_site_ref = Arc::clone(&default_site);
+        async move {
+            let host = extract_request_host(&req);
+            let site = resolve_site_for_request(&sites_ref, &host, &default_site_ref);
+            handle_site_request(req, site, peer_addr).await
+        }
     });
 
     let conn = builder.serve_connection_with_upgrades(io, service);

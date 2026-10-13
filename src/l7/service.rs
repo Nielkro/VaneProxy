@@ -19,12 +19,63 @@ use http_body_util::combinators::BoxBody;
 use hyper::{header, HeaderMap, Method, Request, Response, StatusCode, Uri};
 use tracing::warn;
 
+use crate::caddyfile::cluster::matches_site_address;
 use crate::caddyfile::model::{
     Directive, HeaderOp, MatcherDef, MatcherRule, SiteBlock, StatusOp,
 };
 use crate::caddyfile::placeholders::{replace_placeholders, PlaceholderContext};
 use crate::l7::proxy::forward_request;
 use crate::l7::static_files::{check_file_exists, serve_static_file};
+
+/// Extracts the Host or :authority header value from an incoming HTTP request.
+pub fn extract_request_host<B>(req: &Request<B>) -> String {
+    if let Some(host_val) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
+        if !host_val.is_empty() {
+            return host_val.to_string();
+        }
+    }
+    if let Some(auth) = req.uri().authority() {
+        return auth.as_str().to_string();
+    }
+    String::new()
+}
+
+/// Resolves the target SiteBlock for an incoming request based on its Host or :authority header.
+///
+/// Looks up matches against all configured site addresses:
+/// 1. Exact matches (case-insensitive) take precedence.
+/// 2. Wildcard pattern matches (via `matches_site_address`) are checked second.
+/// 3. If no match is found, falls back to `default_site` (e.g. SNI site from TLS handshake).
+pub fn resolve_site_for_request<'a>(
+    sites: &'a [SiteBlock],
+    host: &str,
+    default_site: &'a SiteBlock,
+) -> &'a SiteBlock {
+    let clean_host = host.split(':').next().unwrap_or(host).trim();
+    if !clean_host.is_empty() {
+        // 1. Exact matches first
+        for site in sites {
+            if site
+                .addresses
+                .iter()
+                .any(|addr| addr.eq_ignore_ascii_case(clean_host))
+            {
+                return site;
+            }
+        }
+        // 2. Wildcard / pattern matches second
+        for site in sites {
+            if site
+                .addresses
+                .iter()
+                .any(|addr| matches_site_address(addr, clean_host))
+            {
+                return site;
+            }
+        }
+    }
+    default_site
+}
 
 /// Handles an incoming HTTP request for a resolved site.
 pub async fn handle_site_request<B>(
@@ -59,17 +110,7 @@ where
     }
 
     // Capture initial request context details
-    let mut host_header = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    if host_header.is_empty() {
-        if let Some(auth) = req.uri().authority() {
-            host_header = auth.as_str().to_string();
-        }
-    }
+    let host_header = extract_request_host(&req);
 
     let method_str = req.method().as_str().to_string();
     let initial_path = req.uri().path().to_string();
@@ -1047,5 +1088,134 @@ mod tests {
         assert_eq!(body, "<html>SPA Fallback</html>");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_site_for_request() {
+        let caddyfile = r#"
+            site-a.example.com {
+                respond "Site A" 200
+            }
+
+            site-b.example.com, alt-b.example.com {
+                respond "Site B" 200
+            }
+
+            *.example.org {
+                respond "Wildcard Org" 200
+            }
+
+            exact.example.org {
+                respond "Exact Org" 200
+            }
+
+            fallback.example.net {
+                respond "Fallback" 200
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let fallback_site = sites.iter().find(|s| s.addresses.contains(&"fallback.example.net".to_string())).unwrap();
+
+        // 1. Exact match on primary domain
+        let resolved = resolve_site_for_request(&sites, "site-a.example.com", fallback_site);
+        assert_eq!(resolved.addresses, vec!["site-a.example.com"]);
+
+        // 2. Exact match with port stripped
+        let resolved = resolve_site_for_request(&sites, "site-a.example.com:443", fallback_site);
+        assert_eq!(resolved.addresses, vec!["site-a.example.com"]);
+
+        // 3. Exact match on secondary domain
+        let resolved = resolve_site_for_request(&sites, "alt-b.example.com:8443", fallback_site);
+        assert_eq!(resolved.addresses, vec!["site-b.example.com", "alt-b.example.com"]);
+
+        // 4. Case-insensitive exact match
+        let resolved = resolve_site_for_request(&sites, "SITE-B.EXAMPLE.COM", fallback_site);
+        assert_eq!(resolved.addresses, vec!["site-b.example.com", "alt-b.example.com"]);
+
+        // 5. Precedence: exact match over wildcard match
+        let resolved = resolve_site_for_request(&sites, "exact.example.org", fallback_site);
+        assert_eq!(resolved.addresses, vec!["exact.example.org"]);
+
+        // 6. Wildcard match
+        let resolved = resolve_site_for_request(&sites, "other.example.org", fallback_site);
+        assert_eq!(resolved.addresses, vec!["*.example.org"]);
+
+        // 7. Unknown host falls back to default_site
+        let resolved = resolve_site_for_request(&sites, "unknown.example.com", fallback_site);
+        assert_eq!(resolved.addresses, vec!["fallback.example.net"]);
+
+        // 8. Empty host falls back to default_site
+        let resolved = resolve_site_for_request(&sites, "", fallback_site);
+        assert_eq!(resolved.addresses, vec!["fallback.example.net"]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_l7_stream_multiplexed_coalescing() {
+        use hyper_util::rt::TokioIo;
+        use http_body_util::Empty;
+
+        let caddyfile = r#"
+            site-a.example.com {
+                respond "I am Site A" 200
+            }
+
+            site-b.example.com {
+                respond "I am Site B" 200
+            }
+        "#;
+        let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let site_a = sites.iter().find(|s| s.addresses.contains(&"site-a.example.com".to_string())).unwrap().clone();
+        let site_b = sites.iter().find(|s| s.addresses.contains(&"site-b.example.com".to_string())).unwrap().clone();
+
+        let sites_arc = Arc::new(vec![site_a.clone(), site_b.clone()]);
+        let default_site_arc = Arc::new(site_a.clone());
+
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let peer_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+
+        tokio::spawn(crate::l7::serve_l7_stream(
+            server_io,
+            sites_arc,
+            default_site_arc,
+            peer_addr,
+        ));
+
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(client_io)).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        // 1. Request to site A over connection
+        let req_a = Request::builder()
+            .header("host", "site-a.example.com")
+            .uri("/")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let resp_a = sender.send_request(req_a).await.unwrap();
+        assert_eq!(resp_a.status(), StatusCode::OK);
+        let body_a = resp_a.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body_a, "I am Site A");
+
+        // 2. Request to site B over the SAME connection (coalescing)
+        let req_b = Request::builder()
+            .header("host", "site-b.example.com")
+            .uri("/")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let resp_b = sender.send_request(req_b).await.unwrap();
+        assert_eq!(resp_b.status(), StatusCode::OK);
+        let body_b = resp_b.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body_b, "I am Site B");
+
+        // 3. Subsequent request to site A over the SAME connection
+        let req_a2 = Request::builder()
+            .header("host", "site-a.example.com")
+            .uri("/")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let resp_a2 = sender.send_request(req_a2).await.unwrap();
+        assert_eq!(resp_a2.status(), StatusCode::OK);
+        let body_a2 = resp_a2.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body_a2, "I am Site A");
     }
 }

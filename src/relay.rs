@@ -252,12 +252,13 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
                     let prefixed = PrefixedStream::new(buf, inbound);
                     let acceptor = acceptor.clone();
                     let site_arc = Arc::new(site.clone());
+                    let sites_arc = Arc::clone(&sites);
                     let peer_addr = peer.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
                     let sni_owned = sni_name.to_string();
                     tokio::spawn(async move {
                         match acceptor.accept(prefixed).await {
                             Ok(tls_stream) => {
-                                serve_l7_stream(tls_stream, site_arc, peer_addr).await;
+                                serve_l7_stream(tls_stream, sites_arc, site_arc, peer_addr).await;
                             }
                             Err(e) => {
                                 let err_str = e.to_string();
