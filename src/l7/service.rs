@@ -368,11 +368,13 @@ where
         if let Directive::TryFiles(files) = dir {
             if let Some(root) = root_path.as_ref() {
                 for candidate in files {
-                    if candidate.starts_with('/') {
+                    let resolved = replace_placeholders(candidate, &placeholder_ctx)
+                        .unwrap_or_else(|_| candidate.clone());
+                    if resolved.starts_with('/') {
                         // Check if file exists on disk
-                        if check_file_exists(root, candidate) {
+                        if check_file_exists(root, &resolved) {
                             let is_head = req.method() == Method::HEAD;
-                            if let Some(resp) = serve_static_file(root, candidate, is_head, &[]).await {
+                            if let Some(resp) = serve_static_file(root, &resolved, is_head, &[]).await {
                                 return Ok(resp);
                             }
                         }
@@ -380,9 +382,11 @@ where
                 }
                 // Fallback to last try_files entry (e.g. rewrite to /index.html)
                 if let Some(fallback) = files.last() {
-                    if fallback.starts_with('/') {
+                    let resolved_fallback = replace_placeholders(fallback, &placeholder_ctx)
+                        .unwrap_or_else(|_| fallback.clone());
+                    if resolved_fallback.starts_with('/') {
                         let is_head = req.method() == Method::HEAD;
-                        if let Some(resp) = serve_static_file(root, fallback, is_head, &[]).await {
+                        if let Some(resp) = serve_static_file(root, &resolved_fallback, is_head, &[]).await {
                             return Ok(resp);
                         }
                     }
@@ -1002,5 +1006,46 @@ mod tests {
 
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(body.is_empty(), "redirect response body must be empty (0 bytes)");
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_try_files_with_placeholders() {
+        let temp_dir = std::env::temp_dir().join(format!("vane_test_try_files_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let sw_file = temp_dir.join("sw.js");
+        let index_file = temp_dir.join("index.html");
+        std::fs::write(&sw_file, "console.log('service worker');").unwrap();
+        std::fs::write(&index_file, "<html>SPA Fallback</html>").unwrap();
+
+        let caddyfile = format!(
+            r#"
+            spa.example.com {{
+                root * "{}"
+                try_files {{path}} /index.html
+                file_server
+            }}
+            "#,
+            temp_dir.display()
+        );
+
+        let sites = parse_caddyfile(&caddyfile, None).unwrap();
+        let site = &sites[0];
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        // 1. Existing file /sw.js should be served directly
+        let req = make_request("GET", "/sw.js", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "console.log('service worker');");
+
+        // 2. Non-existent SPA route should fallback to /index.html
+        let req = make_request("GET", "/dashboard/settings", &[]);
+        let resp = handle_site_request(req, site, peer).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "<html>SPA Fallback</html>");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
