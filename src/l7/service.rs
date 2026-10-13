@@ -782,6 +782,7 @@ fn collect_named_matchers<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::caddyfile::parser::parse_caddyfile;
     use http_body_util::combinators::BoxBody;
     use http_body_util::{BodyExt, Empty};
