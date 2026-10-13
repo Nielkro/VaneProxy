@@ -39,6 +39,7 @@ notify = "8"
 x509-parser = "0.18"
 rustls-native-certs = "0.8"
 flate2 = "1.1.10"
+addr = "0.15.6"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

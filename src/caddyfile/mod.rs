@@ -225,6 +225,16 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_apex_domain_psl() {
+        assert_eq!(extract_apex_domain("foo.example.com"), "example.com");
+        assert_eq!(extract_apex_domain("api.service.co.uk"), "service.co.uk");
+        assert_eq!(extract_apex_domain("site.test.spb.ru"), "test.spb.ru");
+        assert_eq!(extract_apex_domain("my.domain.eu.cc"), "domain.eu.cc");
+        assert_eq!(extract_apex_domain("*.my.domain.eu.cc"), "domain.eu.cc");
+        assert_eq!(extract_apex_domain("domain.eu.cc"), "domain.eu.cc");
+    }
+
+    #[test]
     fn test_wildcard_matching() {
         assert!(matches_site_address("*.example.org", "ad1.example.org"));
         assert!(matches_site_address("*.example.org", "chat.example.org"));

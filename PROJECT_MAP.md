@@ -17,9 +17,9 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/caddyfile/lexer.rs` — Caddyfile tokenizer with exact line/column tracking and comment handling.
 - `src/caddyfile/parser.rs` — Fail-fast recursive descent parser for Caddyfile syntax.
 - `src/caddyfile/placeholders.rs` — Placeholder validation and runtime expansion engine (`{host}`, `{client_ip}`, `{http.request.header.*}`, etc.).
-- `src/caddyfile/cluster.rs` — Apex domain extraction, managed/unmanaged apex SAN consolidation, and SNI site matching.
+- `src/caddyfile/cluster.rs` — Apex domain extraction via Mozilla Public Suffix List (`addr`), managed/unmanaged apex SAN consolidation, and SNI site matching.
 - `src/acme/mod.rs` — ACME module root and lifecycle integration tests.
-- `src/acme/dns_cloudflare.rs` — Cloudflare DNS-01 API client for TXT challenge records.
+- `src/acme/dns_cloudflare.rs` — Cloudflare DNS-01 API client with hierarchical zone discovery for TXT challenge records.
 - `src/acme/alpn_challenge.rs` — Ephemeral TLS-ALPN-01 challenge certificate manager (RFC 8737).
 - `src/acme/store.rs` — Certificate persistence with 0600 file permissions, X.509 notAfter expiration parsing, SAN domain coverage validation, and apex loading.
 - `src/acme/manager.rs` — High-level ACME order manager with singleflight mutex, unified multi-SAN ordering, partitioning fallback with coverage checks, and TLS-ALPN-01 fallback for missing DNS zones.

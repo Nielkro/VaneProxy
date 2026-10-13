@@ -2,19 +2,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Extracts the apex (registrable) domain from a fully-qualified domain name.
-///
-/// Handles common two-part public suffixes (e.g., `.co.uk`, `.com.ru`)
-/// and standard single-part TLDs (e.g., `.ru`, `.com`, `.org`).
+/// Extracts the apex (registrable) domain from a fully-qualified domain name
+/// using the Mozilla Public Suffix List (via `addr`), with fallback for multi-label domains.
 pub fn extract_apex_domain(domain: &str) -> String {
     let clean = domain.trim().trim_start_matches("*.").trim_end_matches('.');
-    let parts: Vec<&str> = clean.split('.').collect();
+    if let Ok(parsed) = addr::parse_domain_name(clean) {
+        if let Some(root) = parsed.root() {
+            return root.to_lowercase();
+        }
+    }
 
+    let parts: Vec<&str> = clean.split('.').collect();
     if parts.len() <= 2 {
         return clean.to_lowercase();
     }
 
-    // Check for well-known two-part suffixes (e.g., .co.uk, .com.ru)
+    // Fallback: check for well-known two-part suffixes
     let len = parts.len();
     let last_two = format!("{}.{}", parts[len - 2], parts[len - 1]).to_lowercase();
     let is_two_part_tld = matches!(
@@ -29,6 +32,7 @@ pub fn extract_apex_domain(domain: &str) -> String {
             | "spb.ru"
             | "com.ua"
             | "co.za"
+            | "eu.cc"
     );
 
     if is_two_part_tld && len >= 3 {

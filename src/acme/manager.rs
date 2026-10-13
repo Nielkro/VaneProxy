@@ -109,10 +109,11 @@ impl AcmeManager {
             for d in site_domains {
                 let apex = extract_apex_domain(d);
                 if checked_apexes.insert(apex.clone()) {
-                    match cf.get_zone_id(&apex).await {
-                        Ok(_) => {
-                            info!(apex = %apex, "apex domain is managed in Cloudflare (DNS-01 enabled)");
+                    match cf.find_zone_for_domain(&apex).await {
+                        Ok((_zone_id, zone_name)) => {
+                            info!(domain = %d, apex = %apex, zone = %zone_name, "domain is managed in Cloudflare (DNS-01 enabled)");
                             managed.insert(apex);
+                            managed.insert(zone_name);
                         }
                         Err(crate::acme::dns_cloudflare::CloudflareError::ZoneNotFound(_)) => {
                             info!(apex = %apex, "apex domain is not in Cloudflare (TLS-ALPN-01 exact domain fallback enabled)");
@@ -269,8 +270,8 @@ impl AcmeManager {
 
             if let Some(cf) = &self.cf_dns {
                 let apex = extract_apex_domain(&domain);
-                match cf.get_zone_id(&apex).await {
-                    Ok(zone_id) => {
+                match cf.find_zone_for_domain(&domain).await {
+                    Ok((zone_id, _zone_name)) => {
                         use_dns01 = true;
                         cf_zone_res = Some(zone_id);
                     }

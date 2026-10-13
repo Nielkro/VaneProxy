@@ -107,11 +107,11 @@ impl CloudflareDns {
         Err(CloudflareError::MissingToken)
     }
 
-    /// Finds the Zone ID for an apex domain (e.g. `example.com`).
-    pub async fn get_zone_id(&self, apex_domain: &str) -> Result<String, CloudflareError> {
+    /// Finds the Zone ID for a domain name by querying Cloudflare zones.
+    pub async fn get_zone_id(&self, zone_name: &str) -> Result<String, CloudflareError> {
         let url = format!(
             "https://api.cloudflare.com/client/v4/zones?name={}",
-            apex_domain.trim().to_lowercase()
+            zone_name.trim().to_lowercase()
         );
 
         let res = self
@@ -137,7 +137,28 @@ impl CloudflareDns {
             .into_iter()
             .next()
             .map(|z| z.id)
-            .ok_or_else(|| CloudflareError::ZoneNotFound(apex_domain.to_string()))
+            .ok_or_else(|| CloudflareError::ZoneNotFound(zone_name.to_string()))
+    }
+
+    /// Finds the closest Cloudflare Zone ID and matching zone name for a domain.
+    ///
+    /// Walks up the DNS hierarchy (e.g. `foo.bar.example.com` -> `bar.example.com` -> `example.com`),
+    /// supporting delegated subdomains (such as `wlun.eu.cc`) as well as standard apex domains.
+    pub async fn find_zone_for_domain(&self, domain: &str) -> Result<(String, String), CloudflareError> {
+        let clean = domain.trim().trim_start_matches("*.").trim_end_matches('.');
+        let parts: Vec<&str> = clean.split('.').collect();
+
+        // Try candidate zones from most specific to least specific (stopping at 2 parts)
+        for i in 0..parts.len().saturating_sub(1) {
+            let candidate = parts[i..].join(".");
+            match self.get_zone_id(&candidate).await {
+                Ok(zone_id) => return Ok((zone_id, candidate)),
+                Err(CloudflareError::ZoneNotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(CloudflareError::ZoneNotFound(clean.to_string()))
     }
 
     /// Creates a temporary TXT record `_acme-challenge.<domain>` with the challenge value.
@@ -250,8 +271,8 @@ impl CloudflareDns {
     pub async fn clean_stale_challenge_records(&self, apexes: &[String]) {
         let mut seen_zones = std::collections::HashSet::new();
         for apex in apexes {
-            match self.get_zone_id(apex).await {
-                Ok(zone_id) => {
+            match self.find_zone_for_domain(apex).await {
+                Ok((zone_id, _zone_name)) => {
                     if !seen_zones.insert(zone_id.clone()) {
                         continue;
                     }
