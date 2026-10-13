@@ -328,6 +328,7 @@ impl AcmeManager {
         let mut authz_iter = order.authorizations();
         while let Some(authz_res) = authz_iter.next().await {
             let mut authz = authz_res?;
+            let domain = authz.identifier().to_string();
             let challenge_type = chosen_challenges
                 .remove(&domain)
                 .unwrap_or(ChallengeType::TlsAlpn01);

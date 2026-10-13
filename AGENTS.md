@@ -20,8 +20,6 @@ After completing any task (changes to code, config, docs, etc.) you MUST automat
 - Scope (optional): `ws`, `ui`, `android`, `chat`, `web`, `server`, etc.
 - Body (optional): bullet-point list prefixed with `-` detailing specific changes
 - Language: English only, lowercase description
-- **No Manual Pre-Commit Testing:** Do NOT manually execute `go test`, `npm run typecheck`, or `cargo check` right before committing. The repository's smart pre-commit hook (`.githooks/pre-commit`) automatically executes targeted tests for staged components during `git commit`. Running them manually beforehand is redundant and wastes agent turns.
-
 Examples:
 ```
 feat(ws): rate limit incoming frames
