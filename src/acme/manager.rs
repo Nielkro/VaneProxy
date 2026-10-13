@@ -12,7 +12,9 @@ use tracing::{error, info, warn};
 use crate::acme::alpn_challenge::AlpnChallengeRegistry;
 use crate::acme::dns_cloudflare::CloudflareDns;
 use crate::acme::store::CertStore;
-use crate::caddyfile::cluster::{consolidate_sans, extract_apex_domain};
+use crate::caddyfile::cluster::{
+    consolidate_sans_with_managed_apexes, extract_apex_domain,
+};
 
 /// Errors encountered during ACME management.
 #[derive(Debug, Error)]
@@ -94,6 +96,35 @@ impl AcmeManager {
             }
             cf.clean_stale_challenge_records(&apexes).await;
         }
+    }
+
+    /// Discovers which apex domains from the given list of site domains have active Cloudflare DNS zones.
+    pub async fn discover_managed_apexes(
+        &self,
+        site_domains: &[String],
+    ) -> std::collections::BTreeSet<String> {
+        let mut managed = std::collections::BTreeSet::new();
+        if let Some(cf) = &self.cf_dns {
+            let mut checked_apexes = std::collections::BTreeSet::new();
+            for d in site_domains {
+                let apex = extract_apex_domain(d);
+                if checked_apexes.insert(apex.clone()) {
+                    match cf.get_zone_id(&apex).await {
+                        Ok(_) => {
+                            info!(apex = %apex, "apex domain is managed in Cloudflare (DNS-01 enabled)");
+                            managed.insert(apex);
+                        }
+                        Err(crate::acme::dns_cloudflare::CloudflareError::ZoneNotFound(_)) => {
+                            info!(apex = %apex, "apex domain is not in Cloudflare (TLS-ALPN-01 exact domain fallback enabled)");
+                        }
+                        Err(e) => {
+                            warn!(apex = %apex, error = %e, "error checking Cloudflare zone for apex domain, treating as unmanaged");
+                        }
+                    }
+                }
+            }
+        }
+        managed
     }
 
     /// Accessor for the active ALPN challenge registry.
@@ -181,8 +212,9 @@ impl AcmeManager {
             return Ok(());
         }
 
+        let managed_apexes = self.discover_managed_apexes(site_domains).await;
         let sans = if self.cf_dns.is_some() {
-            consolidate_sans(site_domains)
+            consolidate_sans_with_managed_apexes(site_domains, Some(&managed_apexes))
         } else {
             // Wildcard certificates cannot be validated via TLS-ALPN-01; use exact domains
             let mut set = std::collections::BTreeSet::new();
@@ -194,7 +226,7 @@ impl AcmeManager {
             }
             set.into_iter().collect()
         };
-        info!(sans = ?sans, "consolidated SANs for ACME order");
+        info!(sans = ?sans, managed_apexes = ?managed_apexes, "consolidated SANs for ACME order");
 
         // Attempt single unified order first
         match self.order_certificate(&sans).await {
@@ -204,7 +236,7 @@ impl AcmeManager {
             }
             Err(e) => {
                 warn!(error = %e, "consolidated multi-SAN order failed, activating partitioning fallback");
-                self.order_partitioned(site_domains).await
+                self.order_partitioned(site_domains, &managed_apexes).await
             }
         }
     }
@@ -385,7 +417,11 @@ impl AcmeManager {
     }
 
     /// Partitioning fallback: orders certificates per apex domain.
-    async fn order_partitioned(&self, site_domains: &[String]) -> Result<(), AcmeError> {
+    async fn order_partitioned(
+        &self,
+        site_domains: &[String],
+        managed_apexes: &std::collections::BTreeSet<String>,
+    ) -> Result<(), AcmeError> {
         let mut apex_groups: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
 
@@ -407,7 +443,7 @@ impl AcmeManager {
             }
 
             let sans = if self.cf_dns.is_some() {
-                consolidate_sans(&domains)
+                consolidate_sans_with_managed_apexes(&domains, Some(managed_apexes))
             } else {
                 domains.iter().filter(|s| !s.starts_with("*.")).cloned().collect()
             };

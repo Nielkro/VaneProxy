@@ -41,9 +41,22 @@ pub fn extract_apex_domain(domain: &str) -> String {
 /// Consolidates a collection of domain names and wildcards across sites
 /// into an optimized, unified list of Subject Alternative Names (SANs).
 ///
-/// If any subdomain exists under an apex domain, both the apex (`domain.com`)
-/// and the wildcard (`*.domain.com`) are included in the consolidated SAN list.
+/// For managed apexes (or all apexes if `managed_apexes` is None):
+/// - Adds apex domain (`domain.com`)
+/// - If subdomains or explicit wildcard exist, adds `*.domain.com` (and nested sub-wildcards)
+/// - Deduplicates exact domains covered by wildcards.
+///
+/// For unmanaged apexes (not present in `managed_apexes`):
+/// - Only exact domains explicitly declared in `domains` are included (without synthetic apex or wildcard).
 pub fn consolidate_sans(domains: &[String]) -> Vec<String> {
+    consolidate_sans_with_managed_apexes(domains, None)
+}
+
+/// Consolidates SANs, expanding apex/wildcard only for apex domains present in `managed_apexes`.
+pub fn consolidate_sans_with_managed_apexes(
+    domains: &[String],
+    managed_apexes: Option<&BTreeSet<String>>,
+) -> Vec<String> {
     let mut apex_groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for d in domains {
@@ -58,30 +71,41 @@ pub fn consolidate_sans(domains: &[String]) -> Vec<String> {
     let mut consolidated = BTreeSet::new();
 
     for (apex, group) in apex_groups {
-        let has_wildcard_or_subdomain = group.iter().any(|d| d.starts_with("*.") || d != &apex);
+        let is_managed = managed_apexes.map(|set| set.contains(&apex)).unwrap_or(true);
 
-        // Always include the apex domain itself
-        consolidated.insert(apex.clone());
+        if is_managed {
+            let has_wildcard_or_subdomain = group.iter().any(|d| d.starts_with("*.") || d != &apex);
 
-        // If subdomains or explicit wildcard exist, include *.apex
-        if has_wildcard_or_subdomain {
-            consolidated.insert(format!("*.{}", apex));
-        }
+            // Always include the apex domain itself
+            consolidated.insert(apex.clone());
 
-        // RFC 6125 §6.4.3: Wildcards (*.domain.com) only match a single level.
-        // For nested subdomains (e.g. met.sub.example.com), *.example.com DOES NOT MATCH.
-        // Include the sub-wildcard (*.sub.example.com).
-        for domain in group {
-            let clean = domain.trim_start_matches("*.");
-            if clean != apex {
-                if let Some(parent) = clean.split_once('.').map(|(_, rest)| rest) {
-                    if parent != apex && parent.ends_with(&apex) {
-                        // Multi-level: add *.parent wildcard
-                        consolidated.insert(format!("*.{}", parent));
+            // If subdomains or explicit wildcard exist, include *.apex
+            if has_wildcard_or_subdomain {
+                consolidated.insert(format!("*.{}", apex));
+            }
+
+            // RFC 6125 §6.4.3: Wildcards (*.domain.com) only match a single level.
+            // For nested subdomains (e.g. met.sub.example.com), *.example.com DOES NOT MATCH.
+            // Include the sub-wildcard (*.sub.example.com).
+            for domain in group {
+                let clean = domain.trim_start_matches("*.");
+                if clean != apex {
+                    if let Some(parent) = clean.split_once('.').map(|(_, rest)| rest) {
+                        if parent != apex && parent.ends_with(&apex) {
+                            // Multi-level: add *.parent wildcard
+                            consolidated.insert(format!("*.{}", parent));
+                        }
+                    }
+                    if !domain.starts_with("*.") {
+                        consolidated.insert(domain.clone());
                     }
                 }
+            }
+        } else {
+            // Unmanaged apex: only keep exact domains explicitly configured (no synthetic apex or wildcard)
+            for domain in group {
                 if !domain.starts_with("*.") {
-                    consolidated.insert(domain.clone());
+                    consolidated.insert(domain);
                 }
             }
         }

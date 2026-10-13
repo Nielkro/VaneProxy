@@ -10,7 +10,9 @@ use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
-pub use cluster::{consolidate_sans, extract_apex_domain, matches_site_address};
+pub use cluster::{
+    consolidate_sans, consolidate_sans_with_managed_apexes, extract_apex_domain, matches_site_address,
+};
 pub use model::{
     Directive, FileServerConfig, HandleBlock, HandlePathBlock, HeaderOp, MatcherDef, MatcherRule,
     RedirConfig, RespondConfig, ResponseHeaderConfig, ReverseProxyConfig, RewriteConfig,
@@ -195,6 +197,29 @@ mod tests {
                 "*.example.com",
                 "*.pnc.example.com",
                 "example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_consolidate_sans_unmanaged_apex_keeps_only_exact_domains() {
+        let domains = vec![
+            "api.example.com".to_string(),
+            "example.com".to_string(),
+            "unmanaged.external.tld".to_string(),
+        ];
+        let mut managed = std::collections::BTreeSet::new();
+        managed.insert("example.com".to_string());
+
+        let sans = consolidate_sans_with_managed_apexes(&domains, Some(&managed));
+        // Managed example.com gets apex + wildcard (*.example.com + example.com)
+        // Unmanaged external.tld gets ONLY exact unmanaged.external.tld (no *.external.tld, no external.tld)
+        assert_eq!(
+            sans,
+            vec![
+                "*.example.com",
+                "example.com",
+                "unmanaged.external.tld",
             ]
         );
     }
