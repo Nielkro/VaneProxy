@@ -133,6 +133,7 @@ async fn main() {
                         let resolver_opt = cert_resolver.clone();
                         let domains_copy = site_domains.clone();
                         tokio::spawn(async move {
+                            mgr_task.clean_stale_challenge_records(&site_domains).await;
                             if let Ok(()) = mgr_task.ensure_certificates(&site_domains).await {
                                 if let Ok(all_certs) = mgr_task.store().load_all_certificates() {
                                     if let Some(res) = &resolver_opt {

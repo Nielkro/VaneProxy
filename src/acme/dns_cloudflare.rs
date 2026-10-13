@@ -216,4 +216,71 @@ impl CloudflareDns {
 
         Ok(())
     }
+
+    /// Lists all TXT records in a zone.
+    pub async fn list_txt_records(&self, zone_id: &str) -> Result<Vec<(String, String)>, CloudflareError> {
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records?type=TXT&per_page=100",
+            zone_id
+        );
+
+        let res = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_token)
+            .send()
+            .await?
+            .json::<CfResponse<Vec<DnsRecordItem>>>()
+            .await?;
+
+        if !res.success {
+            let msg = res
+                .errors
+                .and_then(|errs| errs.into_iter().next())
+                .map(|e| e.message)
+                .unwrap_or_else(|| "unknown API error".to_string());
+            return Err(CloudflareError::Api { message: msg });
+        }
+
+        let items = res.result.unwrap_or_default();
+        Ok(items.into_iter().map(|item| (item.id, item.name)).collect())
+    }
+
+    /// Cleans up dangling `_acme-challenge.*` TXT records for the specified apex zones.
+    pub async fn clean_stale_challenge_records(&self, apexes: &[String]) {
+        let mut seen_zones = std::collections::HashSet::new();
+        for apex in apexes {
+            match self.get_zone_id(apex).await {
+                Ok(zone_id) => {
+                    if !seen_zones.insert(zone_id.clone()) {
+                        continue;
+                    }
+                    match self.list_txt_records(&zone_id).await {
+                        Ok(records) => {
+                            for (record_id, name) in records {
+                                if name.starts_with("_acme-challenge.") || name.contains("._acme-challenge.") {
+                                    tracing::info!(zone = %apex, record = %name, "cleaning up stale ACME challenge TXT record");
+                                    if let Err(e) = self.delete_txt_record(&zone_id, &record_id).await {
+                                        tracing::warn!(zone = %apex, record = %name, error = %e, "failed to delete stale TXT record");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(zone = %apex, error = %e, "failed to list TXT records for stale challenge cleanup");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(apex = %apex, error = %e, "skipping stale challenge cleanup (zone not managed in Cloudflare)");
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DnsRecordItem {
+    id: String,
+    name: String,
 }

@@ -177,6 +177,17 @@ static.yourdomain.com {
 
 ---
 
+### Manual Certificates & Third-Party Domains
+
+For domains whose DNS zone is not managed in Cloudflare (such as external registries or third-party DNS):
+- **Exact domains:** Vane automatically falls back to **TLS-ALPN-01** validation over port 443.
+- **Wildcard or manual domains:** Place certificate and private key files directly in `storage_dir` (e.g. `/var/lib/vane/certs`):
+  - `<domain>.fullchain.pem`
+  - `<domain>.privkey.pem`
+  Vane loads and serves these certificates immediately on startup or hot reload without invoking ACME orders.
+
+---
+
 ## 🧪 Testing & Verification
 
 Run the built-in test suite:

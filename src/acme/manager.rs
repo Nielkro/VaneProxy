@@ -60,6 +60,7 @@ pub struct AcmeManager {
     store: CertStore,
     alpn_registry: AlpnChallengeRegistry,
     cf_dns: Option<CloudflareDns>,
+    order_lock: tokio::sync::Mutex<()>,
 }
 
 impl AcmeManager {
@@ -80,7 +81,19 @@ impl AcmeManager {
             store,
             alpn_registry,
             cf_dns,
+            order_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Cleans up dangling `_acme-challenge.*` TXT records for all site apex domains.
+    pub async fn clean_stale_challenge_records(&self, site_domains: &[String]) {
+        if let Some(cf) = &self.cf_dns {
+            let mut apexes = Vec::new();
+            for d in site_domains {
+                apexes.push(extract_apex_domain(d));
+            }
+            cf.clean_stale_challenge_records(&apexes).await;
+        }
     }
 
     /// Accessor for the active ALPN challenge registry.
@@ -152,6 +165,15 @@ impl AcmeManager {
             return Ok(());
         }
 
+        // Mutual exclusion: prevent concurrent ensure_certificates triggers (inotify / SIGHUP / periodic timer)
+        let _guard = match self.order_lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                info!("certificate order already in progress, skipping concurrent trigger");
+                return Ok(());
+            }
+        };
+
         // Check if certificates already exist on disk covering the domains
         let all_exist = site_domains.iter().all(|d| self.store.has_certificate_for(d));
         if all_exist {
@@ -199,6 +221,8 @@ impl AcmeManager {
         let new_order = NewOrder::new(&identifiers);
         let mut order = account.new_order(&new_order).await?;
         let mut created_cf_records: Vec<(String, String)> = Vec::new(); // (zone_id, record_id)
+        let mut chosen_challenges: std::collections::HashMap<String, ChallengeType> =
+            std::collections::HashMap::new();
 
         // Phase 1: Provision all challenge responses (DNS-01 TXT records or TLS-ALPN-01)
         let mut authz_iter = order.authorizations();
@@ -207,24 +231,66 @@ impl AcmeManager {
             let domain = authz.identifier().to_string();
             let is_wildcard = domain.starts_with("*.");
 
-            // Select challenge
-            if is_wildcard || self.cf_dns.is_some() {
-                // Use DNS-01
-                let cf = self.cf_dns.as_ref().ok_or_else(|| {
-                    AcmeError::NoSupportedChallenge(format!(
-                        "domain '{}' requires DNS-01 but Cloudflare credentials are not configured",
-                        domain
-                    ))
-                })?;
+            // Determine challenge strategy: DNS-01 or TLS-ALPN-01
+            let mut use_dns01 = false;
+            let mut cf_zone_res = None;
+
+            if let Some(cf) = &self.cf_dns {
+                let apex = extract_apex_domain(&domain);
+                match cf.get_zone_id(&apex).await {
+                    Ok(zone_id) => {
+                        use_dns01 = true;
+                        cf_zone_res = Some(zone_id);
+                    }
+                    Err(crate::acme::dns_cloudflare::CloudflareError::ZoneNotFound(_)) => {
+                        if is_wildcard {
+                            warn!(
+                                domain = %domain,
+                                apex = %apex,
+                                "wildcard domain has no Cloudflare DNS zone; TLS-ALPN-01 cannot issue wildcards, omitting DNS-01"
+                            );
+                            return Err(AcmeError::NoSupportedChallenge(format!(
+                                "wildcard domain '{}' has no Cloudflare DNS zone",
+                                domain
+                            )));
+                        } else {
+                            info!(
+                                domain = %domain,
+                                apex = %apex,
+                                "Cloudflare zone not found for exact domain, falling back to TLS-ALPN-01 challenge"
+                            );
+                            use_dns01 = false;
+                        }
+                    }
+                    Err(e) => {
+                        if is_wildcard {
+                            return Err(AcmeError::Cloudflare(e));
+                        } else {
+                            warn!(
+                                domain = %domain,
+                                error = %e,
+                                "Cloudflare API error for exact domain, attempting TLS-ALPN-01 fallback"
+                            );
+                            use_dns01 = false;
+                        }
+                    }
+                }
+            } else if is_wildcard {
+                return Err(AcmeError::NoSupportedChallenge(format!(
+                    "domain '{}' requires DNS-01 but Cloudflare credentials are not configured",
+                    domain
+                )));
+            }
+
+            if use_dns01 {
+                let cf = self.cf_dns.as_ref().unwrap();
+                let zone_id = cf_zone_res.unwrap();
 
                 let challenge = authz
                     .challenge(ChallengeType::Dns01)
                     .ok_or_else(|| AcmeError::NoSupportedChallenge(domain.clone()))?;
 
                 let key_auth = challenge.key_authorization();
-                let apex = extract_apex_domain(&domain);
-                let zone_id = cf.get_zone_id(&apex).await?;
-
                 let clean_domain = domain.trim_start_matches("*.");
                 let record_name = format!("_acme-challenge.{}", clean_domain);
                 let digest_b64 = BASE64_URL_SAFE_NO_PAD.encode(key_auth.digest());
@@ -233,6 +299,7 @@ impl AcmeManager {
                     .create_txt_record(&zone_id, &record_name, &digest_b64)
                     .await?;
                 created_cf_records.push((zone_id, record_id));
+                chosen_challenges.insert(domain, ChallengeType::Dns01);
             } else {
                 // Use TLS-ALPN-01
                 let challenge = authz
@@ -243,6 +310,7 @@ impl AcmeManager {
                 self.alpn_registry
                     .register_challenge(&domain, key_auth.as_str())
                     .map_err(|e| AcmeError::NoSupportedChallenge(format!("ALPN registration: {e}")))?;
+                chosen_challenges.insert(domain, ChallengeType::TlsAlpn01);
             }
         }
 
@@ -261,13 +329,11 @@ impl AcmeManager {
         while let Some(authz_res) = authz_iter.next().await {
             let mut authz = authz_res?;
             let domain = authz.identifier().to_string();
-            let is_wildcard = domain.starts_with("*.");
 
-            let challenge_type = if is_wildcard || self.cf_dns.is_some() {
-                ChallengeType::Dns01
-            } else {
-                ChallengeType::TlsAlpn01
-            };
+            let challenge_type = chosen_challenges
+                .get(&domain)
+                .copied()
+                .unwrap_or(ChallengeType::TlsAlpn01);
 
             let mut challenge = authz
                 .challenge(challenge_type)
@@ -331,6 +397,17 @@ impl AcmeManager {
         }
 
         for (apex, domains) in apex_groups {
+            // Check if all domains in this apex group are already covered by valid certificates
+            let all_covered = domains.iter().all(|d| self.store.has_certificate_for(d));
+            if all_covered {
+                info!(
+                    apex = %apex,
+                    domains = ?domains,
+                    "all domains in apex group already covered by valid certificates, skipping order"
+                );
+                continue;
+            }
+
             let sans = if self.cf_dns.is_some() {
                 consolidate_sans(&domains)
             } else {

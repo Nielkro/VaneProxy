@@ -22,11 +22,11 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/acme/dns_cloudflare.rs` — Cloudflare DNS-01 API client for TXT challenge records.
 - `src/acme/alpn_challenge.rs` — Ephemeral TLS-ALPN-01 challenge certificate manager (RFC 8737).
 - `src/acme/store.rs` — Certificate persistence with 0600 file permissions, X.509 notAfter expiration parsing, SAN domain coverage validation, and apex loading.
-- `src/acme/manager.rs` — High-level ACME order manager with unified multi-SAN and partitioning fallback.
+- `src/acme/manager.rs` — High-level ACME order manager with singleflight mutex, unified multi-SAN ordering, partitioning fallback with coverage checks, and TLS-ALPN-01 fallback for missing DNS zones.
 - `src/l7/mod.rs` — Layer-7 reverse proxy and static asset HTTP server engine.
 - `src/l7/proxy.rs` — Upstream HTTP/HTTPS reverse proxy forwarder with WebSocket upgrade and X-Accel-Redirect interception.
-- `src/l7/service.rs` — Request dispatcher handling handle blocks ordering, handle_path, try_files, handle_errors, respond, request_body 413 limits, response headers, and gzip compression (`encode gzip`).
-- `src/l7/static_files.rs` — Static file server with traversal protection, MIME detection, hide rules, and disk existence checks.
+- `src/l7/service.rs` — Request dispatcher handling handle blocks ordering, handle_path, try_files, handle_errors, respond, request_body 413 limits, response headers, gzip compression (`encode gzip`), and L7 access logging.
+- `src/l7/static_files.rs` — Static file server with traversal protection, MIME detection, hide rules, ETag / Last-Modified caching (304), and byte range streaming (206/416).
 - `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
 - `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with apex domain grouping and hot-reloading support.
 - `src/watcher.rs` — Zero-downtime hot reload coordinator with configurable periodic renewal interval, SIGHUP, and 500ms debounce.
@@ -63,3 +63,4 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `plan/05-testing-risks.md` — Unit/integration/manual test matrix, ECH and fragmentation risks, out-of-MVP scope (metrics, QUIC, TLS termination).
 - `plan/06-reverse-proxy-auto-ssl.md` — Hybrid L4/L7 architecture, Caddyfile parser, unified multi-domain SAN Auto-SSL (DNS-01 / TLS-ALPN-01), reverse proxy, static file server, and hot-reload.
 - `plan/07-https-upstream-directives.md` — Phase 3 plan (Russian): HTTPS upstreams, matchers, placeholders, handle dispatcher, migration batches for remaining server sites.
+- `plan/08-tz-remaining.md` — ТЗ (Russian): remaining work after :443 cutover (ACME singleflight/coverage-cleanup/ALPN-fallback, static Etag/Range, ops finish).

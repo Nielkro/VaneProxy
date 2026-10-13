@@ -90,6 +90,8 @@ where
     let mut matchers: HashMap<String, &MatcherDef> = HashMap::new();
     collect_named_matchers(&site.directives, &mut matchers);
 
+    let start_instant = std::time::Instant::now();
+
     // 1. Check request body size limit (default 250 MB if unspecified)
     let body_limit = site.directives.iter().find_map(|d| match d {
         Directive::RequestBodyLimit(lim) => Some(*lim),
@@ -250,6 +252,25 @@ where
         resp = maybe_compress_gzip(resp).await;
     }
 
+    let elapsed = start_instant.elapsed();
+    let resp_status = resp.status().as_u16();
+    let content_len = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+
+    tracing::info!(
+        method = %method_str,
+        host = %host_header,
+        path = %initial_path,
+        status = resp_status,
+        size = %content_len,
+        duration_ms = elapsed.as_millis(),
+        peer = %peer_addr,
+        "L7 request completed"
+    );
+
     Ok(resp)
 }
 
@@ -257,6 +278,11 @@ where
 async fn maybe_compress_gzip(
     resp: Response<BoxBody<Bytes, hyper::Error>>,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
+    // Range responses (206 Partial Content) must not be compressed as slices are identity-based
+    if resp.status() == StatusCode::PARTIAL_CONTENT {
+        return resp;
+    }
+
     let (mut parts, body) = resp.into_parts();
 
     // Do not re-compress if Content-Encoding is already present
@@ -408,8 +434,7 @@ where
                     if resolved.starts_with('/') {
                         // Check if file exists on disk
                         if check_file_exists(root, &resolved) {
-                            let is_head = req.method() == Method::HEAD;
-                            if let Some(resp) = serve_static_file(root, &resolved, is_head, &[]).await {
+                            if let Some(resp) = serve_static_file(root, &resolved, req.method(), req.headers(), &[]).await {
                                 return Ok(resp);
                             }
                         }
@@ -420,8 +445,7 @@ where
                     let resolved_fallback = replace_placeholders(fallback, &placeholder_ctx)
                         .unwrap_or_else(|_| fallback.clone());
                     if resolved_fallback.starts_with('/') {
-                        let is_head = req.method() == Method::HEAD;
-                        if let Some(resp) = serve_static_file(root, &resolved_fallback, is_head, &[]).await {
+                        if let Some(resp) = serve_static_file(root, &resolved_fallback, req.method(), req.headers(), &[]).await {
                             return Ok(resp);
                         }
                     }
@@ -437,8 +461,7 @@ where
     });
 
     if let (Some(root), Some(fs_cfg)) = (root_path.as_ref(), file_server_cfg) {
-        let is_head = req.method() == Method::HEAD;
-        if let Some(resp) = serve_static_file(root, &req_path, is_head, &fs_cfg.hide).await {
+        if let Some(resp) = serve_static_file(root, &req_path, req.method(), req.headers(), &fs_cfg.hide).await {
             return Ok(resp);
         }
     }
@@ -563,7 +586,8 @@ async fn execute_handle_errors(
                 }
                 if let Some(root) = effective_root {
                     let path = replace_placeholders(&cfg.target, &err_ctx).unwrap_or_else(|_| cfg.target.clone());
-                    if let Some(resp) = serve_static_file(root, &path, false, &[]).await {
+                    let dummy_headers = hyper::HeaderMap::new();
+                    if let Some(resp) = serve_static_file(root, &path, &Method::GET, &dummy_headers, &[]).await {
                         // Preserve the original error status code
                         let (mut parts, body) = resp.into_parts();
                         parts.status = StatusCode::from_u16(status_code).unwrap_or(parts.status);
