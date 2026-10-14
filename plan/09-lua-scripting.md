@@ -10,38 +10,81 @@
 - Если использовать одну глобальную `Lua` VM с фичей `send` в `mlua`, все worker-потоки Tokio блокируются на одном мьютексе внутреннего C-состояния Lua.
 - Если использовать `thread_local!` инстансы без пула, асинхронные вызовы (`.await`, сетевые походы, таймеры) в work-stealing шедулере Tokio могут проснуться на другом ОС-потоке, что делает `Future` не-`Send` либо приводит к панике при миграции между потоками.
 
-### 1.2. Выбранное решение: Пул независимых VM (Object Pool)
-Используется пул изолированных виртуальных машин Lua через lock-free канал (`crossbeam_channel` или `tokio::sync::mpsc`):
-- Для пула включается фича `send` в `mlua`. Каждая отдельная VM полностью изолирована (свой независимый `lua_State`), поэтому внутри запроса лочится **только взятая из пула VM**, никакого межпоточного lock contention нет.
-- При начале выполнения Lua-фазы запрос берет свободную VM из пула (`pool.acquire().await`).
-- Запрос удерживает VM на время выполнения фазы. Если скрипт делает асинхронную операцию (`vane.sleep`, `vane.http_get`), корутина Tokio свободно мигрирует между потоками пула Tokio, так как `Lua` реализует `Send`.
-- По завершении фазы VM сбрасывает локальный контекст (`vane.ctx`, временные таблицы) и возвращается в пул.
-- Количество VM в пуле конфигурируется (по умолчанию `num_cpus * 4`).
+### 1.2. Выбранное решение: Асинхронный пул независимых VM (Object Pool)
+Используется пул изолированных виртуальных машин Lua с неблокирующим Tokio-совместимым пулом:
+- **Архитектура пула:** Связка `tokio::sync::Semaphore` (для асинхронного ожидания слотов без блокировки потоков Tokio) + `crossbeam::queue::ArrayQueue<mlua::Lua>` (lock-free хранилище свободных машин).
+- **Схема работы:**
+  ```rust
+  pub struct LuaVmPool {
+      semaphore: Arc<tokio::sync::Semaphore>,
+      vms: Arc<crossbeam::queue::ArrayQueue<mlua::Lua>>,
+  }
+  
+  impl LuaVmPool {
+      pub async fn acquire(&self) -> PooledLuaVm {
+          let permit = self.semaphore.clone().acquire_owned().await.expect("pool closed");
+          let vm = self.vms.pop().expect("semaphore guarantees available VM");
+          PooledLuaVm { vm: Some(vm), permit, pool: self.vms.clone() }
+      }
+  }
+  ```
+- **RAII Guard (`PooledLuaVm`):** При выходе из области видимости `Drop` возвращает VM обратно в `ArrayQueue` и сбрасывает permit семафора. Запрос берет машину наносекундным pop-ом без единого мьютекса ядра.
+- Для пула включается фича `send` в `mlua`. Каждая отдельная VM полностью изолирована (свой независимый `lua_State`), поэтому лочится **только взятая из пула VM** во время фазы.
+- **Освобождение перед апстримом (Критично!):** Запрос держит VM **только** на время исполнения конкретной фазы (`rewrite_by_lua`, `access_by_lua` или `header_filter_by_lua`). Перед походом в апстрим (Reverse Proxy сетевой I/O, который может длиться секунды) VM **немедленно возвращается в пул**. Это гарантирует, что даже при пуле из `num_cpus * 4` инстансов тысячи медленных бэкенд-запросов не исчерпают пул и не заблокируют сервер.
 
 ---
 
-## 2. Передача контекста запроса без войны с лайфтаймами
+## 2. Безопасность контекста запроса и защита от утечек данных
 
 ### 2.1. Проблема ссылок `&mut Request<B>`
 - В `mlua` любой `UserData` по умолчанию требует `'static`.
 - Попытка прокинуть ссылку `&mut Request` через сырые указатели небезопасна (скрипт может сохранить объект запроса в глобальную таблицу Lua, что приведет к Use-After-Free).
 - Механизм `Lua::scope` не поддерживает полноценную асинхронность (`async userdata methods`).
 
-### 2.2. Выбранное решение: Деструктуризация `http::request::Parts`
-На время выполнения цепочки Lua-фаз запрос деструктуризируется:
+### 2.2. Защита от Use-After-Free и утечек: `Arc<RwLock<Option<LuaRequestContext>>>`
+Если скрипт выполнит вредоносный или ошибочный код вида `_G.stolen_req = vane.req`, то при повторном использовании VM из пула следующий запрос другого клиента рискует утечкой данных, а Rust не сможет вернуть владение `Parts` через `Arc::try_unwrap`.
+
+Решение строится на временном владении через `Option::take()`:
 ```rust
-let (parts, body) = req.into_parts();
-let req_ctx = Arc::new(RwLock::new(LuaRequestContext {
-    method: parts.method,
-    uri: parts.uri,
-    headers: parts.headers,
-    client_ip: peer_addr,
-}));
+pub struct LuaRequestContext {
+    pub method: Method,
+    pub uri: Uri,
+    pub headers: HeaderMap,
+    pub client_ip: IpAddr,
+}
+
+pub struct LuaRequestHandle(pub Arc<RwLock<Option<LuaRequestContext>>>);
 ```
-1. `LuaRequestContext` оборачивается в потокобезопасный `Arc<RwLock<...>>` и регистрируется в VM как `'static UserData`.
-2. Lua-скрипт читает и модифицирует заголовки, метод и URI через методы `vane.req.*`.
-3. После завершения фаз `Parts` собираются обратно в `Request::from_parts(parts, body)` и передаются дальше в пайплайн (Reverse Proxy или Static Server).
-4. Никакого `unsafe`, никаких висячих указателей и строгая типобезопасность Rust.
+
+1. **Деструктуризация запроса:** На время выполнения фазы запрос разбирается:
+   ```rust
+   let (parts, body) = req.into_parts();
+   let ctx_inner = LuaRequestContext {
+       method: parts.method,
+       uri: parts.uri,
+       headers: parts.headers,
+       client_ip: peer_addr,
+   };
+   let handle = LuaRequestHandle(Arc::new(RwLock::new(Some(ctx_inner))));
+   ```
+2. **Экспорт в VM:** `LuaRequestHandle` регистрируется как `'static UserData`. Любой метод (`vane.req.get_header(...)`) проверяет:
+   ```rust
+   let guard = self.0.read().map_err(|_| mlua::Error::runtime("poisoned lock"))?;
+   let ctx = guard.as_ref().ok_or_else(|| {
+       mlua::Error::runtime("attempt to use expired request context")
+   })?;
+   ```
+3. **Завершение фазы и отчуждение:** По завершении фазы Rust выполняет:
+   ```rust
+   let ctx = handle.0.write().unwrap().take().expect("context must be present");
+   parts.method = ctx.method;
+   parts.uri = ctx.uri;
+   parts.headers = ctx.headers;
+   ```
+4. **Гарантии:**
+   - Если скрипт попытался сохранить `vane.req` в глобал или замкнутую корутину, последующий доступ мгновенно вернет ошибку `"attempt to use expired request context"`.
+   - Владение `Parts` возвращается в Rust без клонирования структуры, позволяя пересобрать `Request::from_parts(parts, body)`.
+   - Данные предыдущих запросов физически не могут утечь в следующие сессии.
 
 ---
 
@@ -60,17 +103,19 @@ let req_ctx = Arc::new(RwLock::new(LuaRequestContext {
            │   2. ACCESS PHASE                    │  access_by_lua
            │   (auth, токены, IP rate-limit, 403) │
            └──────────────────┬───────────────────┘
+                              │ ──► [Возврат VM в пул!]
                               ▼
            ┌──────────────────────────────────────┐
-           │   3. CONTENT PHASE                   │  content_by_lua
-           │   (генерация ответа без бэкенда)     │
+           │   3. CONTENT PHASE / UPSTREAM        │  content_by_lua / Proxy / Static
+           │   (поход в апстрим без удержания VM) │
            └──────────────────┬───────────────────┘
-                              │ (если контент не сгенерирован — proxy / static)
+                              │ ──► [Взятие новой VM из пула!]
                               ▼
            ┌──────────────────────────────────────┐
            │   4. HEADER FILTER PHASE             │  header_filter_by_lua
            │   (модификация заголовков ответа)    │
            └──────────────────┬───────────────────┘
+                              │ ──► [Возврат VM в пул!]
                               ▼
            ┌──────────────────────────────────────┐
            │   5. LOG PHASE                       │  log_by_lua
@@ -109,23 +154,48 @@ impl std::fmt::Display for LuaExitSignal {
 
 ---
 
-## 5. Межфазный контекст `vane.ctx` (Аналог `ngx.ctx`)
+## 5. Межфазный контекст `vane.ctx` (Rust-backed контекст)
 
-Для передачи произвольных данных между фазами одного запроса (например, распарсенный токен в `access_by_lua` -> чтение роли пользователя в `header_filter_by_lua` или `log_by_lua`) реализуется таблица `vane.ctx`:
-- При начале обработки HTTP-запроса создается чистая Lua-таблица `ctx = lua.create_table()?`.
-- Таблица регистрируется в глобальном скоупе запроса под именем `vane.ctx`.
-- Любая фаза этого запроса может свободно писать и читать поля:
-  ```lua
-  -- В access_by_lua:
-  vane.ctx.user_id = 42
-  vane.ctx.roles = {"admin", "editor"}
+### 5.1. Архитектурное противоречие пула VM и чистого Lua
+- Обычная Lua-таблица (`lua.create_table()`) жестко привязана к конкретному инстансу `lua_State`.
+- Поскольку запрос освобождает VM перед походом в апстрим и берет **другую** свободную VM для фазы `header_filter_by_lua` или `log_by_lua`, хранить данные контекста запроса в таблице Lua невозможно.
 
-  -- В header_filter_by_lua:
-  if vane.ctx.user_id then
-      vane.header["X-Auth-User"] = tostring(vane.ctx.user_id)
-  end
-  ```
-- По завершении HTTP-запроса таблица автоматически уничтожается сборщиком мусора Lua без загрязнения других запросов.
+### 5.2. Реализация: Rust-хранилище с Lua UserData-фасадом
+Данные `vane.ctx` живут на стороне Rust на протяжении всего времени жизни HTTP-запроса:
+```rust
+#[derive(Clone, Debug)]
+pub enum LuaCtxValue {
+    Nil,
+    Boolean(bool),
+    Integer(i64),
+    Number(f64),
+    String(String),
+    Map(HashMap<String, LuaCtxValue>),
+    List(Vec<LuaCtxValue>),
+}
+
+#[derive(Clone, Default)]
+pub struct RequestSharedContext(pub Arc<RwLock<HashMap<String, LuaCtxValue>>>);
+```
+
+В Lua каждой фазы прокидывается UserData `vane.ctx` с метаметодами `__index` и `__newindex`:
+- При записи `vane.ctx.user_id = 42` метод `__newindex` конвертирует Lua-примитив в `LuaCtxValue` и сохраняет его в общий `Arc<RwLock<HashMap<...>>>`.
+- При чтении `vane.ctx.user_id` в следующей фазе на **совершенно другой VM** метод `__index` достает значение из Rust-хранилища и возвращает его в стек Lua.
+- Поддерживаются примитивы (строки, числа, булевы флаги) и вложенные простые таблицы/массивы.
+- При завершении HTTP-запроса Rust-контекст просто деаллоцируется, освобождая память.
+
+```lua
+-- В access_by_lua (VM #1):
+vane.ctx.user_id = 42
+vane.ctx.user_role = "admin"
+
+-- [Поход в апстрим: VM #1 отдана в пул, запрос ждет ответа бэкенда]
+
+-- В header_filter_by_lua (VM #2):
+if vane.ctx.user_role == "admin" then
+    vane.header["X-Is-Admin"] = "1"
+end
+```
 
 ---
 
@@ -136,7 +206,12 @@ impl std::fmt::Display for LuaExitSignal {
 - Полностью удаляются библиотеки `io`, `os`, `package`, `debug`.
 - Время отдается не через блокирующий `os.time()`, а через оптимизированный метод `vane.now()`, возвращающий закэшированное атомарное время из Rust-рантайма (`coarse time` без лишних системных вызовов).
 
-### 6.2. Защита от бесконечных циклов и зависаний (Instruction Hooks)
+### 6.2. Изоляция глобального окружения (_ENV / setfenv)
+Чтобы скрипты не могли загрязнять глобальную таблицу `_G` инстанса VM (например, случайными глобальными переменными `x = 10` или попыткой переопределить стандартные функции), каждый скрипт выполняется в изолированном окружении:
+- Создается индивидуальная таблица окружения с метатаблицей `__index = _G`.
+- Запись любых глобальных переменных происходит в локальную таблицу запроса, не затрагивая глобальный стейт `_G` самой VM.
+
+### 6.3. Защита от бесконечных циклов и зависаний (Instruction Hooks)
 Для предотвращения зависания воркера из-за `while true do end` или тяжелых регулярных выражений:
 - Настраивается `lua.set_hook(HookTriggers::every_nth_instruction(100_000), ...)` с лимитом инструкций на запрос (например, не более 5 000 000 инструкций).
 - При превышении лимита скрипт аварийно завершается с ошибкой `InstructionLimitExceeded`, запрос получает статус `504 Gateway Timeout` или `500`, а воркер Tokio продолжает работу.
@@ -176,17 +251,23 @@ impl std::fmt::Display for LuaExitSignal {
 
 1. **Этап 1: Добавление зависимостей и каркас пула VM (`src/lua/mod.rs`, `src/lua/pool.rs`)**
    - Добавление `mlua` (с `luajit` / `lua54`, `async`, `send`).
-   - Реализация `LuaPool` с ограничением емкости и санитаризацией окружения (песочница без `io`/`os`, хук лимита инструкций).
+   - Реализация асинхронного `LuaVmPool` на базе `tokio::sync::Semaphore` + `crossbeam::queue::ArrayQueue<mlua::Lua>`.
+   - Реализация RAII Guard (`PooledLuaVm`), возвращающего VM в очередь на `drop`.
+   - Санитаризация окружения (песочница без `io`/`os`, хук лимита инструкций `HookTriggers::every_nth_instruction`).
 2. **Этап 2: Парсер Caddyfile (`src/caddyfile/model.rs`, `parser.rs`)**
    - Добавление директив `rewrite_by_lua`, `access_by_lua`, `content_by_lua`, `header_filter_by_lua`, `log_by_lua` (inline и `*_file`).
 3. **Этап 3: Биндинги и контекст (`src/lua/bindings.rs`)**
-   - Реализация `LuaRequestContext`, таблиц `vane.req`, `vane.header`, `vane.ctx`.
-   - Реализация `vane.exit()` через `ExternalError`.
+   - Реализация `LuaRequestHandle` с `Arc<RwLock<Option<LuaRequestContext>>>` и безопасным `Option::take()` по окончании фазы (с защитой от `_G`-утечек и Use-After-Free).
+   - Реализация `RequestSharedContext` на стороне Rust (`HashMap<String, LuaCtxValue>`) с `UserData`-фасадом (`__index` / `__newindex`), сохраняющим состояние между фазами при смене VM.
+   - Изоляция окружения скриптов через песочницу `_ENV` (`setfenv`).
+   - Реализация `vane.exit()` через `ExternalError` (`LuaExitSignal`).
    - Реализация `vane.shared` кэша.
 4. **Этап 4: Встраивание в L7 пайплайн (`src/l7/service.rs`)**
    - Интеграция фаз в `handle_site_request` и `execute_directive_pipeline`.
+   - Освобождение VM обратно в пул перед апстрим-запросами (`proxy.forward(...)`).
 5. **Этап 5: Тесты и верификация (`tests/`)**
    - Unit-тесты для прерывания по `vane.exit()`.
-   - Тесты передачи данных через `vane.ctx`.
+   - Тесты передачи данных через `vane.ctx` между разными VM из пула.
+   - Тесты защиты от висячих ссылок (`attempt to use expired request context`).
    - Тесты защиты от бесконечного цикла.
-   - Тесты асинхронного `vane.sleep` без блокировки Tokio.
+   - Тесты асинхронного `vane.sleep` без блокировки Tokio-воркеров.
