@@ -64,3 +64,4 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `plan/06-reverse-proxy-auto-ssl.md` — Hybrid L4/L7 architecture, Caddyfile parser, unified multi-domain SAN Auto-SSL (DNS-01 / TLS-ALPN-01), reverse proxy, static file server, and hot-reload.
 - `plan/07-https-upstream-directives.md` — Phase 3 plan (Russian): HTTPS upstreams, matchers, placeholders, handle dispatcher, migration batches for remaining server sites.
 - `plan/08-tz-remaining.md` — ТЗ (Russian): remaining work after :443 cutover (ACME singleflight/coverage-cleanup/ALPN-fallback, static Etag/Range, ops finish).
+- `plan/09-lua-scripting.md` — Plan (Russian): OpenResty/Nginx-style Lua scripting integration (mlua, phases, directives, API, and L7 lifecycle hooks).
