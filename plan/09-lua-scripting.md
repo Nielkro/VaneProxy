@@ -1,12 +1,51 @@
-# План внедрения Lua-скриптинга в Vane (OpenResty/Nginx style)
+# Архитектурный план: Lua-скриптинг в Vane (OpenResty/Nginx style)
 
-Документ описывает архитектуру и этапы реализации поддержки скриптинга Lua в L7-пайплайне Vane по аналогии с `ngx_http_lua_module` (OpenResty).
+Документ фиксирует архитектуру, модель параллелизма, биндинги и защиту рантайма для Lua-скриптинга в L7-пайплайне Vane с учётом специфики асинхронного Tokio-рантайма и `mlua`.
 
 ---
 
-## 1. Архитектура и фазы жизненного цикла (Phases)
+## 1. Модель параллелизма и жизненный цикл VM (Архитектура без lock-contention)
 
-В Nginx (OpenResty) Lua встроен в дискретные фазы обработки HTTP-запроса. В Vane пайплайн выстраивается по аналогичной схеме:
+### 1.1. Проблема наивного подхода
+- Если использовать одну глобальную `Lua` VM с фичей `send` в `mlua`, все worker-потоки Tokio блокируются на одном мьютексе внутреннего C-состояния Lua.
+- Если использовать `thread_local!` инстансы без пула, асинхронные вызовы (`.await`, сетевые походы, таймеры) в work-stealing шедулере Tokio могут проснуться на другом ОС-потоке, что делает `Future` не-`Send` либо приводит к панике при миграции между потоками.
+
+### 1.2. Выбранное решение: Пул независимых VM (Object Pool)
+Используется пул изолированных виртуальных машин Lua через lock-free канал (`crossbeam_channel` или `tokio::sync::mpsc`):
+- Для пула включается фича `send` в `mlua`. Каждая отдельная VM полностью изолирована (свой независимый `lua_State`), поэтому внутри запроса лочится **только взятая из пула VM**, никакого межпоточного lock contention нет.
+- При начале выполнения Lua-фазы запрос берет свободную VM из пула (`pool.acquire().await`).
+- Запрос удерживает VM на время выполнения фазы. Если скрипт делает асинхронную операцию (`vane.sleep`, `vane.http_get`), корутина Tokio свободно мигрирует между потоками пула Tokio, так как `Lua` реализует `Send`.
+- По завершении фазы VM сбрасывает локальный контекст (`vane.ctx`, временные таблицы) и возвращается в пул.
+- Количество VM в пуле конфигурируется (по умолчанию `num_cpus * 4`).
+
+---
+
+## 2. Передача контекста запроса без войны с лайфтаймами
+
+### 2.1. Проблема ссылок `&mut Request<B>`
+- В `mlua` любой `UserData` по умолчанию требует `'static`.
+- Попытка прокинуть ссылку `&mut Request` через сырые указатели небезопасна (скрипт может сохранить объект запроса в глобальную таблицу Lua, что приведет к Use-After-Free).
+- Механизм `Lua::scope` не поддерживает полноценную асинхронность (`async userdata methods`).
+
+### 2.2. Выбранное решение: Деструктуризация `http::request::Parts`
+На время выполнения цепочки Lua-фаз запрос деструктуризируется:
+```rust
+let (parts, body) = req.into_parts();
+let req_ctx = Arc::new(RwLock::new(LuaRequestContext {
+    method: parts.method,
+    uri: parts.uri,
+    headers: parts.headers,
+    client_ip: peer_addr,
+}));
+```
+1. `LuaRequestContext` оборачивается в потокобезопасный `Arc<RwLock<...>>` и регистрируется в VM как `'static UserData`.
+2. Lua-скрипт читает и модифицирует заголовки, метод и URI через методы `vane.req.*`.
+3. После завершения фаз `Parts` собираются обратно в `Request::from_parts(parts, body)` и передаются дальше в пайплайн (Reverse Proxy или Static Server).
+4. Никакого `unsafe`, никаких висячих указателей и строгая типобезопасность Rust.
+
+---
+
+## 3. Фазы жизненного цикла запроса
 
 ```
                   Входящий запрос (L7 / HTTP)
@@ -34,140 +73,120 @@
            └──────────────────┬───────────────────┘
                               ▼
            ┌──────────────────────────────────────┐
-           │   5. BODY FILTER PHASE (опционально) │  body_filter_by_lua
-           │   (потоковая трансформация тела)     │
-           └──────────────────┬───────────────────┘
-                              ▼
-           ┌──────────────────────────────────────┐
-           │   6. LOG PHASE                       │  log_by_lua
+           │   5. LOG PHASE                       │  log_by_lua
            │   (асинхронная отправка метрик/логов)│
            └──────────────────────────────────────┘
 ```
 
-Фундамент реализации — крейт **`mlua`** (с фичами `luajit` / `lua54`, `async`, `send`), обеспечивающий интеграцию с асинхронным рантаймом Tokio, нулевые копирования буферов и строгую типобезопасность.
-
 ---
 
-## 2. Синтаксис директив Caddyfile
+## 4. Механизм мгновенного прерывания `vane.exit()`
 
-Поддерживаются как inline-блоки кода, так и внешние `.lua` файлы:
+### 4.1. Поведение
+`vane.exit(code, [body])` должен **немедленно прерывать** выполнение Lua-скрипта (код, следующий за `vane.exit()`, никогда не исполняется).
 
-```caddy
-example.com {
-    # Глобальная инициализация состояния / модулей
-    lua_load /etc/vane/lua/init.lua
+### 4.2. Реализация через ExternalError
+В Rust объявляется специальный тип ошибки прерывания:
+```rust
+#[derive(Debug)]
+pub struct LuaExitSignal {
+    pub status: StatusCode,
+    pub body: Option<Bytes>,
+}
 
-    # 1. Проверка авторизации на входе (Access Phase)
-    @api path /api/*
-    handle @api {
-        access_by_lua '
-            local token = vane.req.get_header("Authorization")
-            if not token or not token:find("^Bearer ") then
-                vane.exit(401, "{\"error\": \"Unauthorized\"}")
-            end
-            
-            -- Проброс метаданных в апстрим
-            vane.req.set_header("X-User-Id", "12345")
-        '
-        reverse_proxy 127.0.0.1:8000
-    }
-
-    # 2. Чистая генерация ответа на лету (Content Phase)
-    handle /healthz {
-        content_by_lua '
-            vane.header["Content-Type"] = "application/json"
-            vane.say("{\"status\": \"ok\", \"time\": " .. os.time() .. "}")
-        '
-    }
-
-    # 3. Внешний скрипт для сложных сценариев
-    handle /custom/* {
-        rewrite_by_lua_file /etc/vane/lua/dynamic_rewrite.lua
-        reverse_proxy 127.0.0.1:9000
+impl std::error::Error for LuaExitSignal {}
+impl std::fmt::Display for LuaExitSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "vane.exit({})", self.status)
     }
 }
 ```
+1. Функция `vane.exit(status, body)` формирует `LuaExitSignal` и возвращает `Err(mlua::Error::external(signal))`.
+2. Lua runtime немедленно разворачивает стек исполнения и выходит в Rust.
+3. Диспетчер фаз Vane перехватывает `mlua::Error`:
+   - Если это `LuaExitSignal` — он преобразуется в `ActionControl::RespondImmediately(Response)` со статусом и телом, прерывая дальнейший пайплайн.
+   - Если это реальная ошибка скрипта (синтаксис, nil index) — логируется `error!` и возвращается `500 Internal Server Error`.
 
 ---
 
-## 3. Lua API (`vane.*` — аналог `ngx.*`)
+## 5. Межфазный контекст `vane.ctx` (Аналог `ngx.ctx`)
 
-Модуль предоставляет глобальный объект `vane` (с алиасом `ngx` для совместимости со сниппетами):
+Для передачи произвольных данных между фазами одного запроса (например, распарсенный токен в `access_by_lua` -> чтение роли пользователя в `header_filter_by_lua` или `log_by_lua`) реализуется таблица `vane.ctx`:
+- При начале обработки HTTP-запроса создается чистая Lua-таблица `ctx = lua.create_table()?`.
+- Таблица регистрируется в глобальном скоупе запроса под именем `vane.ctx`.
+- Любая фаза этого запроса может свободно писать и читать поля:
+  ```lua
+  -- В access_by_lua:
+  vane.ctx.user_id = 42
+  vane.ctx.roles = {"admin", "editor"}
 
-### `vane.req` (Работа с запросом)
-- `vane.req.get_method()`: возвращает метод (`"GET"`, `"POST"`, etc.).
-- `vane.req.get_uri()`: текущий URI path.
-- `vane.req.set_uri(new_path)`: rewrite пути.
-- `vane.req.get_headers()`: таблица входящих заголовков.
-- `vane.req.get_header(name)`: значение заголовка.
-- `vane.req.set_header(name, val)`: перезаписать заголовок для апстрима.
-- `vane.req.get_query()`: таблица URL query параметров.
-- `vane.req.get_body()`: чтение тела запроса (буферизированное).
-- `vane.req.get_client_ip()`: IP-клиента (SocketAddr).
-
-### `vane.resp` / `vane.*` (Формирование ответа)
-- `vane.status = 200`: установка HTTP-статуса ответа.
-- `vane.header[name] = val`: установка/модификация заголовка ответа.
-- `vane.say(body)` / `vane.print(body)`: отправка тела ответа.
-- `vane.exit(code, [body])`: немедленное прерывание цепочки и отправка HTTP-ответа (`401`, `403`, `302`, `500`).
-- `vane.redirect(url, [status])`: редирект (301/302).
-
-### Утилиты и Shared State
-- `vane.shared.DICT`: потокобезопасный key-value кэш в памяти (`vane.shared.cache:set(key, val, ttl)`, `get()`, `incr()`) через `dashmap` или `parking_lot::RwLock<HashMap>`.
-- `vane.log(level, msg)`: вывод в лог Vane (`tracing::info!`, `warn!`, `error!`).
-- `vane.sleep(seconds)`: неблокирующий асинхронный `tokio::time::sleep`.
+  -- В header_filter_by_lua:
+  if vane.ctx.user_id then
+      vane.header["X-Auth-User"] = tostring(vane.ctx.user_id)
+  end
+  ```
+- По завершении HTTP-запроса таблица автоматически уничтожается сборщиком мусора Lua без загрязнения других запросов.
 
 ---
 
-## 4. Этапы реализации
+## 6. Песочница и безопасность рантайма (Sandbox & Guardrails)
 
-### Этап 1. Зависимости и Lua Runtime (`src/lua/mod.rs`)
-1. Добавить `mlua = { version = "0.10", features = ["luajit", "async", "send"] }` (с фолбэком на `lua54`, если luajit недоступен на платформе сборки).
-2. Создать пул виртуальных машин Lua (`LuaEngine`) или thread-local инстансы во избежание глобального lock contention между worker threads Tokio.
-3. Компиляция и кэширование байткода скриптов при парсинге/старте (поддержка hot-reload).
+### 6.1. Удаление блокирующих стандартных библиотек
+Чтобы скрипты не могли заблокировать пул воркеров Tokio синхронным вводом-выводом или системными вызовами, при инициализации каждой Lua VM отключаются опасные библиотеки:
+- Полностью удаляются библиотеки `io`, `os`, `package`, `debug`.
+- Время отдается не через блокирующий `os.time()`, а через оптимизированный метод `vane.now()`, возвращающий закэшированное атомарное время из Rust-рантайма (`coarse time` без лишних системных вызовов).
 
-### Этап 2. Модели и парсер Caddyfile (`src/caddyfile/`)
-1. Расширить `Directive` в `model.rs`:
-   ```rust
-   pub enum LuaSource {
-       Inline(String),
-       File(PathBuf),
-   }
+### 6.2. Защита от бесконечных циклов и зависаний (Instruction Hooks)
+Для предотвращения зависания воркера из-за `while true do end` или тяжелых регулярных выражений:
+- Настраивается `lua.set_hook(HookTriggers::every_nth_instruction(100_000), ...)` с лимитом инструкций на запрос (например, не более 5 000 000 инструкций).
+- При превышении лимита скрипт аварийно завершается с ошибкой `InstructionLimitExceeded`, запрос получает статус `504 Gateway Timeout` или `500`, а воркер Tokio продолжает работу.
 
-   pub enum Directive {
-       // ...
-       RewriteByLua(LuaSource),
-       AccessByLua(LuaSource),
-       ContentByLua(LuaSource),
-       HeaderFilterByLua(LuaSource),
-       LogByLua(LuaSource),
-   }
-   ```
-2. Поддержать парсинг директив в `parser.rs`:
-   - `rewrite_by_lua`, `rewrite_by_lua_file`
-   - `access_by_lua`, `access_by_lua_file`
-   - `content_by_lua`, `content_by_lua_file`
-   - `header_filter_by_lua`
-   - `log_by_lua`
+---
 
-### Этап 3. Биндинги Rust <-> Lua (`src/lua/bindings.rs`)
-1. Реализовать типы `UserData` для `mlua`:
-   - `LuaRequest`: безопасная обёртка над ссылкой на `Request<B>`.
-   - `LuaResponse`: билдер формируемого ответа.
-   - Механизм `ActionControl` (`Continue`, `RespondImmediately(Response)`, `Rewrite(String)`).
-2. Поддержка `vane.shared`: реализация in-memory LRU/TTL хранилища (аналог `lua_shared_dict`), разделяемого между всеми контекстами исполнения.
+## 7. Lua API (`vane.*` / `ngx.*`)
 
-### Этап 4. Интеграция в пайплайн L7 (`src/l7/service.rs`)
-1. **Rewrite-фаза:** перед выбором поддиректив/эндпоинта выполнить `rewrite_by_lua`. Если скрипт изменил URI (`vane.req.set_uri`) — обновить URI запроса. Если вызван `vane.exit()` — вернуть ответ.
-2. **Access-фаза:** перед `reverse_proxy` и `file_server` вызвать `access_by_lua`. При возврате `vane.exit(401/403)` — прервать обработку.
-3. **Content-фаза:** если объявлен `content_by_lua` — исполнить скрипт вместо проксирования или статики, вернуть сформированный ответ.
-4. **Header-фильтр:** перед отдачей клиенту прогнать заголовки ответа через `header_filter_by_lua`.
+### `vane.req`
+- `vane.req.get_method() -> string`
+- `vane.req.get_uri() -> string`
+- `vane.req.set_uri(path: string)`
+- `vane.req.get_headers() -> table`
+- `vane.req.get_header(name: string) -> string|nil`
+- `vane.req.set_header(name: string, value: string)`
+- `vane.req.clear_header(name: string)`
+- `vane.req.get_query() -> table`
+- `vane.req.get_client_ip() -> string`
 
-### Этап 5. Тестирование и бенчмаркинг
-1. **Юнит-тесты (`cargo test`):**
-   - Блокировка неавторизованных запросов через `access_by_lua`.
-   - Модификация заголовков через `header_filter_by_lua`.
-   - Генерация JSON-ответов через `content_by_lua`.
-   - Разделяемая память `vane.shared.DICT`.
-2. **Бенчмарки:**
-   - Замер оверхеда исполнения LuaJIT против нативного reverse-proxy на Rust (цель: < 5-10 микросекунд на запрос).
+### `vane.resp` / `vane.*`
+- `vane.status = <number>`
+- `vane.header[name] = <string>`
+- `vane.say(body: string)` / `vane.print(body: string)`
+- `vane.exit(status: number, [body: string])`
+- `vane.redirect(url: string, [status: number])`
+
+### Служебные функции
+- `vane.ctx` — per-request таблица.
+- `vane.now() -> number` — текущее UNIX-время (секунды/миллисекунды).
+- `vane.sleep(seconds: number)` — неблокирующий асинхронный сон (`tokio::time::sleep`).
+- `vane.log(level: string, message: string)` — вывод в tracing лог (`"info"`, `"warn"`, `"error"`, `"debug"`).
+- `vane.shared.DICT` — разделяемый между всеми VM потокобезопасный key-value кэш в памяти (`get`, `set`, `incr`, `delete`).
+
+---
+
+## 8. Этапы внедрения
+
+1. **Этап 1: Добавление зависимостей и каркас пула VM (`src/lua/mod.rs`, `src/lua/pool.rs`)**
+   - Добавление `mlua` (с `luajit` / `lua54`, `async`, `send`).
+   - Реализация `LuaPool` с ограничением емкости и санитаризацией окружения (песочница без `io`/`os`, хук лимита инструкций).
+2. **Этап 2: Парсер Caddyfile (`src/caddyfile/model.rs`, `parser.rs`)**
+   - Добавление директив `rewrite_by_lua`, `access_by_lua`, `content_by_lua`, `header_filter_by_lua`, `log_by_lua` (inline и `*_file`).
+3. **Этап 3: Биндинги и контекст (`src/lua/bindings.rs`)**
+   - Реализация `LuaRequestContext`, таблиц `vane.req`, `vane.header`, `vane.ctx`.
+   - Реализация `vane.exit()` через `ExternalError`.
+   - Реализация `vane.shared` кэша.
+4. **Этап 4: Встраивание в L7 пайплайн (`src/l7/service.rs`)**
+   - Интеграция фаз в `handle_site_request` и `execute_directive_pipeline`.
+5. **Этап 5: Тесты и верификация (`tests/`)**
+   - Unit-тесты для прерывания по `vane.exit()`.
+   - Тесты передачи данных через `vane.ctx`.
+   - Тесты защиты от бесконечного цикла.
+   - Тесты асинхронного `vane.sleep` без блокировки Tokio.
