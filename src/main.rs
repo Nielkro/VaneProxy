@@ -8,6 +8,7 @@ pub mod acme;
 pub mod caddyfile;
 mod config;
 pub mod l7;
+pub mod lua;
 mod logging;
 mod proxy_proto;
 mod relay;

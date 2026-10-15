@@ -40,6 +40,8 @@ x509-parser = "0.18"
 rustls-native-certs = "0.8"
 flate2 = "1.1.10"
 addr = "0.15.6"
+crossbeam-queue = "0.3"
+mlua = { version = "0.10", features = ["luajit", "vendored", "async", "send"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

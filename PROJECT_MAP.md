@@ -29,6 +29,10 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/l7/static_files.rs` — Static file server with traversal protection, MIME detection, hide rules, ETag / Last-Modified caching (304), and byte range streaming (206/416).
 - `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
 - `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with apex domain grouping and hot-reloading support.
+- `src/lua/mod.rs` — Lua runtime integration root.
+- `src/lua/pool.rs` — Asynchronous Lua VM pool using `tokio::sync::Semaphore`, lock-free `crossbeam::queue::ArrayQueue`, safe drop ordering, and instruction hook timeout guard.
+- `src/lua/context.rs` — Per-request context bindings (`vane.req.*`), Rust-backed cross-phase `vane.ctx` UserData facade, response mutations (`vane.header`, `vane.status`, `vane.say`), `vane.exit()` signal unwinding, and isolated `_ENV` sandboxing.
+- `src/lua/shared_dict.rs` — Thread-safe in-memory key-value dictionary shared across all requests and VM instances (`vane.shared.DICT`).
 - `src/watcher.rs` — Zero-downtime hot reload coordinator with configurable periodic renewal interval, SIGHUP, and 500ms debounce.
 - `Cargo.toml` — Package manifest: `vane` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
