@@ -46,6 +46,7 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `LICENSE` — MIT open-source license.
 - `config.example.toml` — Example configuration: dual-stack listen, Xray (raw) and Caddy (PPv2) backends, default route to Caddy, SNI routes for messenger and site domains.
 - `config.production.toml` — Production configuration template with strict security, DNS-01/ALPN, and L4/L7 routing.
+- `examples/lua/backend.lua` — Example standalone OpenResty/Nginx-style Lua backend demonstrating dynamic routing, shared metrics, authentication guards, and async sleep.
 - `tests/e2e/test_vane.py` — Standalone Python E2E integration test suite testing L4 SNI routing, PROXY protocol v2, default fallback, HTTP redirect, SIGHUP hot reload, and TLS termination with X.509 certificate verification.
 - `tests/e2e/config.ci.toml` — Isolated CI/E2E configuration file for Vane test runners supporting local Pebble ACME server and custom root CA.
 - `tests/e2e/pebble/pebble.minica.pem` — Pebble Root CA certificate for local ACME testing.

@@ -719,4 +719,131 @@ mod tests {
         let res: String = vm.load(script).set_environment(env).eval_async().await.unwrap();
         assert_eq!(res, "slept");
     }
+
+    #[tokio::test]
+    async fn test_lua_backend_script_execution() {
+        let script = include_str!("../../examples/lua/backend.lua");
+        let pool = LuaVmPool::new(2, 500_000).unwrap();
+        let registry = SharedDictRegistry::new();
+
+        // Helper closure to run a request against the Lua backend
+        let execute_request = |uri: &'static str, headers: HeaderMap| {
+            let pool = pool.clone();
+            let registry = registry.clone();
+            async move {
+                let vm = pool.acquire().await;
+                let req_ctx = LuaRequestContext {
+                    method: Method::GET,
+                    uri: uri.parse().unwrap(),
+                    headers,
+                    client_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+                };
+                let handle = LuaRequestHandle::new(req_ctx);
+                let resp_handle = LuaResponseHandle::default();
+                let env = create_request_env(
+                    &vm,
+                    handle,
+                    RequestSharedContext::default(),
+                    resp_handle.clone(),
+                    Some(registry),
+                )
+                .unwrap();
+
+                let res: Result<(), mlua::Error> =
+                    vm.load(script).set_environment(env).exec_async().await;
+                let mutations = resp_handle.0.read().unwrap().clone();
+                (res, mutations)
+            }
+        };
+
+        // 1. Test GET / -> 200 HTML
+        {
+            let (res, mutations) = execute_request("/", HeaderMap::new()).await;
+            assert!(res.is_ok());
+            assert_eq!(mutations.status, Some(StatusCode::OK));
+            let body_str = String::from_utf8(mutations.body.unwrap().to_vec()).unwrap();
+            assert!(body_str.contains("Welcome to Vane Lua Backend!"));
+            assert!(mutations
+                .set_headers
+                .iter()
+                .any(|(k, v)| k.as_str() == "content-type" && v == "text/html; charset=utf-8"));
+            assert!(mutations
+                .set_headers
+                .iter()
+                .any(|(k, v)| k.as_str() == "x-powered-by" && v == "Vane-Lua-Core"));
+        }
+
+        // 2. Test GET /api/stats -> First call hits = 1
+        {
+            let (res, mutations) = execute_request("/api/stats", HeaderMap::new()).await;
+            assert!(res.is_ok());
+            assert_eq!(mutations.status, Some(StatusCode::OK));
+            let body_str = String::from_utf8(mutations.body.unwrap().to_vec()).unwrap();
+            assert!(body_str.contains("\"total_requests\":1"));
+            assert!(body_str.contains("\"client_ip\":\"192.168.1.100\""));
+            assert!(mutations
+                .set_headers
+                .iter()
+                .any(|(k, v)| k.as_str() == "x-total-hits" && v == "1"));
+        }
+
+        // 3. Test GET /api/stats -> Second call hits = 2 (verifies cross-request shared memory counter)
+        {
+            let (res, mutations) = execute_request("/api/stats", HeaderMap::new()).await;
+            assert!(res.is_ok());
+            assert_eq!(mutations.status, Some(StatusCode::OK));
+            let body_str = String::from_utf8(mutations.body.unwrap().to_vec()).unwrap();
+            assert!(body_str.contains("\"total_requests\":2"));
+            assert!(mutations
+                .set_headers
+                .iter()
+                .any(|(k, v)| k.as_str() == "x-total-hits" && v == "2"));
+        }
+
+        // 4. Test GET /api/protected without auth -> 401 via vane.exit
+        {
+            let (res, _) = execute_request("/api/protected", HeaderMap::new()).await;
+            assert!(res.is_err());
+            let err = res.unwrap_err();
+            let signal = extract_exit_signal(&err).expect("must be exit signal");
+            assert_eq!(signal.status, StatusCode::UNAUTHORIZED);
+            let body = String::from_utf8(signal.body.as_ref().unwrap().to_vec()).unwrap();
+            assert!(body.contains("\"error\":\"Unauthorized\""));
+        }
+
+        // 5. Test GET /api/protected with valid bearer token -> 200 JSON
+        {
+            let mut headers = HeaderMap::new();
+            headers.insert("Authorization", "Bearer secret-token-42".parse().unwrap());
+            let (res, mutations) = execute_request("/api/protected", headers).await;
+            assert!(res.is_ok());
+            assert_eq!(mutations.status, Some(StatusCode::OK));
+            let body_str = String::from_utf8(mutations.body.unwrap().to_vec()).unwrap();
+            assert!(body_str.contains("\"status\":\"authenticated\""));
+            assert!(mutations
+                .set_headers
+                .iter()
+                .any(|(k, v)| k.as_str() == "x-user-role" && v == "administrator"));
+        }
+
+        // 6. Test GET /api/delay -> 200 with async sleep
+        {
+            let (res, mutations) = execute_request("/api/delay", HeaderMap::new()).await;
+            assert!(res.is_ok());
+            assert_eq!(mutations.status, Some(StatusCode::OK));
+            let body_str = String::from_utf8(mutations.body.unwrap().to_vec()).unwrap();
+            assert!(body_str.contains("\"status\":\"delayed\""));
+        }
+
+        // 7. Test GET /nonexistent -> 404 via vane.exit
+        {
+            let (res, _) = execute_request("/nonexistent/endpoint", HeaderMap::new()).await;
+            assert!(res.is_err());
+            let err = res.unwrap_err();
+            let signal = extract_exit_signal(&err).expect("must be exit signal");
+            assert_eq!(signal.status, StatusCode::NOT_FOUND);
+            let body = String::from_utf8(signal.body.as_ref().unwrap().to_vec()).unwrap();
+            assert!(body.contains("\"error\":\"NotFound\""));
+        }
+    }
 }
