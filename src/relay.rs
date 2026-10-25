@@ -316,9 +316,20 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
         return;
     }
 
-    // Bidirectional splice until EOF or error.
-    match tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await {
-        Ok((up, down)) => {
+    // Bidirectional zero-copy splice until EOF or error.
+    let res = match &mut upstream {
+        Upstream::Tcp(tcp_up) => {
+            tokio_splice2::copy_bidirectional(&mut inbound, tcp_up).await
+        }
+        Upstream::Unix(unix_up) => {
+            tokio_splice2::copy_bidirectional(&mut inbound, unix_up).await
+        }
+    };
+
+    match res.and_then(|t| t.into_result()) {
+        Ok(traffic) => {
+            let up = traffic.tx as u64;
+            let down = traffic.rx as u64;
             if cfg.access_log {
                 tracing::info!(
                     peer = peer.map(sock_str).unwrap_or_else(|| "-".into()),
