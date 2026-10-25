@@ -169,7 +169,8 @@ async fn connect_backend(addr: &BackendAddr, timeout_d: Duration) -> std::io::Re
             let s = tokio::time::timeout(timeout_d, TcpStream::connect(*a))
                 .await
                 .map_err(|_| timed_out())??;
-            let _ = s.set_nodelay(true);
+            // Note: Keep default Nagle / buffering on upstream to allow packet
+            // coalescing on high-throughput client uploads to local backends.
             Ok(Upstream::Tcp(s))
         }
         BackendAddr::Unix(p) => {
