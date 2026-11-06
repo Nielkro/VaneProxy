@@ -1,0 +1,15 @@
+[alias]
+# Final production builds (fat LTO, single codegen unit: slow, fastest runtime).
+# Usage: cargo build-i9
+build-i9 = "build --release --config build.rustflags=[\"-C\",\"target-cpu=skylake\",\"-C\",\"target-feature=+avx,+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt,+sse4.1,+sse4.2,+aes,+pclmulqdq,+rdrand,+rdseed,+adx,+clflushopt,+xsaveopt,+xsavec,+xsaves,+movbe,+f16c\"]"
+
+# Usage: cargo build-xeon
+build-xeon = "build --release --config build.rustflags=[\"-C\",\"target-cpu=broadwell\",\"-C\",\"target-feature=+avx,+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt,+sse4.1,+sse4.2,+aes,+pclmulqdq,+rdrand,+rdseed,+adx,+movbe,+f16c,+rtm\"]"
+
+# Fast iteration builds (thin LTO, 16 codegen units: parallel, ~same runtime).
+# Usage: cargo build-i9-fast
+build-i9-fast = "build --profile release-fast --config build.rustflags=[\"-C\",\"target-cpu=skylake\",\"-C\",\"target-feature=+avx,+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt,+sse4.1,+sse4.2,+aes,+pclmulqdq,+rdrand,+rdseed,+adx,+clflushopt,+xsaveopt,+xsavec,+xsaves,+movbe,+f16c\"]"
+
+# Usage: cargo build-xeon-fast
+build-xeon-fast = "build --profile release-fast --config build.rustflags=[\"-C\",\"target-cpu=broadwell\",\"-C\",\"target-feature=+avx,+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt,+sse4.1,+sse4.2,+aes,+pclmulqdq,+rdrand,+rdseed,+adx,+movbe,+f16c,+rtm\"]"
+

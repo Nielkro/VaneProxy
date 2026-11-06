@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::{
@@ -14,7 +15,7 @@ use hyper_util::rt::TokioIo;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
-use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{copy_bidirectional_with_sizes, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
@@ -22,6 +23,25 @@ use tracing::error;
 
 use crate::caddyfile::model::{HeaderOp, Upstream};
 use crate::caddyfile::placeholders::{replace_placeholders, PlaceholderContext};
+
+/// Deadline for establishing an upstream TCP/Unix connection.
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Buffer size per direction for upgraded (WebSocket) tunnels.
+const UPGRADE_COPY_BUFFER: usize = 32 * 1024;
+
+async fn connect_with_timeout<F, T>(fut: F) -> std::io::Result<T>
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, fut).await {
+        Ok(res) => res,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "upstream connect timed out",
+        )),
+    }
+}
 
 enum TransportStream {
     Tcp(TcpStream),
@@ -234,7 +254,7 @@ where
 
     // Connect to upstream target
     let transport = match upstream {
-        Upstream::Tcp(addr_str) => match TcpStream::connect(addr_str).await {
+        Upstream::Tcp(addr_str) => match connect_with_timeout(TcpStream::connect(addr_str)).await {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 TransportStream::Tcp(s)
@@ -247,7 +267,7 @@ where
                     .unwrap());
             }
         },
-        Upstream::Unix(socket_path) => match UnixStream::connect(socket_path).await {
+        Upstream::Unix(socket_path) => match connect_with_timeout(UnixStream::connect(socket_path)).await {
             Ok(s) => TransportStream::Unix(s),
             Err(e) => {
                 error!(socket = %socket_path.display(), error = %e, "failed to connect to Unix socket upstream");
@@ -259,7 +279,7 @@ where
         },
         Upstream::Tls(tls_cfg) => {
             // TCP connect to destination
-            let tcp_stream = match TcpStream::connect(&tls_cfg.addr).await {
+            let tcp_stream = match connect_with_timeout(TcpStream::connect(&tls_cfg.addr)).await {
                 Ok(s) => {
                     let _ = s.set_nodelay(true);
                     s
@@ -336,7 +356,13 @@ where
                     (Ok(downstream), Ok(upstream)) => {
                         let mut down_io = TokioIo::new(downstream);
                         let mut up_io = TokioIo::new(upstream);
-                        let _ = copy_bidirectional(&mut down_io, &mut up_io).await;
+                        let _ = copy_bidirectional_with_sizes(
+                            &mut down_io,
+                            &mut up_io,
+                            UPGRADE_COPY_BUFFER,
+                            UPGRADE_COPY_BUFFER,
+                        )
+                        .await;
                     }
                     (Err(e), _) => error!(error = %e, "downstream upgrade failed"),
                     (_, Err(e)) => error!(error = %e, "upstream upgrade failed"),

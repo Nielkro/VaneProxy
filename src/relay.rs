@@ -2,11 +2,12 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
+use crossbeam_queue::ArrayQueue;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tracing::{debug, warn};
@@ -18,6 +19,29 @@ use crate::config::{BackendAddr, Config};
 use crate::l7::serve_l7_stream;
 use crate::proxy_proto::encode_ppv2;
 use crate::sni::parse_client_hello;
+
+/// Initial ClientHello buffer size, and the max capacity worth recycling.
+const HELLO_BUF_CAP: usize = 4096;
+const HELLO_BUF_MAX_RECYCLE: usize = HELLO_BUF_CAP * 4;
+const HELLO_POOL_SIZE: usize = 256;
+
+/// Small lock-free pool of ClientHello read buffers to avoid per-connection
+/// heap churn on the L4 fast path.
+static HELLO_POOL: LazyLock<ArrayQueue<Vec<u8>>> =
+    LazyLock::new(|| ArrayQueue::new(HELLO_POOL_SIZE));
+
+fn acquire_hello_buf() -> Vec<u8> {
+    HELLO_POOL
+        .pop()
+        .unwrap_or_else(|| Vec::with_capacity(HELLO_BUF_CAP))
+}
+
+fn release_hello_buf(mut buf: Vec<u8>) {
+    if buf.capacity() <= HELLO_BUF_MAX_RECYCLE {
+        buf.clear();
+        let _ = HELLO_POOL.push(buf);
+    }
+}
 
 /// Unified runtime state holding active config, sites, ALPN registry, and TLS acceptor.
 pub struct RuntimeState {
@@ -194,8 +218,8 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     let max_bytes = cfg.max_client_hello_bytes;
 
     // Read the first TLS record (or whatever the client sent) with a deadline.
-    // Cap the upfront allocation: most ClientHellos fit in a single 4 KiB read.
-    let mut buf = Vec::with_capacity(max_bytes.min(4096));
+    // Reuse a pooled buffer: most ClientHellos fit in a single 4 KiB read.
+    let mut buf = acquire_hello_buf();
     let read_ok =
         tokio::time::timeout(hello_timeout, read_hello(&mut inbound, &mut buf, max_bytes))
             .await
@@ -203,6 +227,7 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
 
     if buf.is_empty() {
         debug!(?peer, read_ok, "empty preface, closing");
+        release_hello_buf(buf);
         return;
     }
 
@@ -294,6 +319,7 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
         Ok(s) => s,
         Err(e) => {
             warn!(?peer, backend = %backend_name, error = %e, "backend connect failed");
+            release_hello_buf(buf);
             return;
         }
     };
@@ -304,15 +330,18 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
             let hdr = encode_ppv2(p, l);
             if let Err(e) = upstream.write_all(hdr.as_slice()).await {
                 warn!(?peer, backend = %backend_name, error = %e, "ppv2 write failed");
+                release_hello_buf(buf);
                 return;
             }
         } else if let Err(e) = upstream.write_all(&local_header()).await {
             warn!(?peer, backend = %backend_name, error = %e, "ppv2 local write failed");
+            release_hello_buf(buf);
             return;
         }
     }
     if let Err(e) = upstream.write_all(&buf).await {
         warn!(?peer, backend = %backend_name, error = %e, "preface write failed");
+        release_hello_buf(buf);
         return;
     }
 
@@ -351,6 +380,8 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
             warn!(?peer, backend = %backend_name, error = %e, "relay failed");
         }
     }
+
+    release_hello_buf(buf);
 }
 
 /// Minimal LOCAL header used when socket addresses are unavailable.

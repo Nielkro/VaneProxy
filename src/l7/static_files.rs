@@ -429,21 +429,17 @@ pub async fn serve_static_file(
         }
     }
 
-    // Standard 200 OK response
-    let body_bytes = if is_head {
-        Bytes::new()
+    // Standard 200 OK response: stream the file instead of buffering it whole.
+    let body = if is_head {
+        crate::l7::empty_box()
     } else {
-        match fs::read(&file_path).await {
-            Ok(bytes) => Bytes::from(bytes),
+        match fs::File::open(&file_path).await {
+            Ok(file) => crate::l7::file_box(file, file_len),
             Err(_) => return None,
         }
     };
 
-    let content_len = if is_head {
-        file_len
-    } else {
-        body_bytes.len() as u64
-    };
+    let content_len = file_len;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -452,7 +448,7 @@ pub async fn serve_static_file(
         .header(header::ETAG, etag)
         .header(header::LAST_MODIFIED, last_modified)
         .header(header::ACCEPT_RANGES, "bytes")
-        .body(crate::l7::full_box(body_bytes))
+        .body(body)
         .unwrap();
 
     Some(response)
@@ -544,6 +540,29 @@ mod tests {
         assert_eq!(resp416.headers().get(header::CONTENT_RANGE).unwrap(), "bytes */30");
 
         // Cleanup
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_large_file_body() {
+        use http_body_util::BodyExt;
+
+        let temp_dir = std::env::temp_dir().join(format!("vane_test_stream_{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("big.bin");
+        let data: Vec<u8> = (0..250_000u32).map(|i| (i % 251) as u8).collect();
+        tokio::fs::write(&file_path, &data).await.unwrap();
+
+        let resp = serve_static_file(&temp_dir, "/big.bin", &Method::GET, &HeaderMap::new(), &[])
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get(header::CONTENT_LENGTH).unwrap(), "250000");
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.len(), data.len());
+        assert_eq!(&body[..], &data[..]);
+
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

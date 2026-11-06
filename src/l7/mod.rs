@@ -5,11 +5,18 @@ pub mod service;
 pub mod static_files;
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
+use http_body_util::BodyExt;
+use hyper::body::{Body, Frame, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::error;
 
 use crate::caddyfile::model::SiteBlock;
@@ -66,4 +73,76 @@ pub fn empty_box() -> http_body_util::combinators::BoxBody<bytes::Bytes, hyper::
     Empty::new()
         .map_err(|never: std::convert::Infallible| match never {})
         .boxed()
+}
+
+/// Chunk size used when streaming a static file from disk.
+const FILE_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Streaming HTTP body backed by a file, avoiding loading whole files into memory.
+struct FileBody {
+    file: File,
+    buf: Vec<u8>,
+    remaining: u64,
+}
+
+impl FileBody {
+    fn new(file: File, len: u64) -> Self {
+        Self {
+            file,
+            buf: vec![0u8; FILE_CHUNK_SIZE],
+            remaining: len,
+        }
+    }
+}
+
+impl Body for FileBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+        let this = self.get_mut();
+        if this.remaining == 0 {
+            return Poll::Ready(None);
+        }
+
+        let want = this.buf.len().min(this.remaining as usize);
+        let mut read_buf = ReadBuf::new(&mut this.buf[..want]);
+        match Pin::new(&mut this.file).poll_read(cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => {
+                let n = read_buf.filled().len();
+                if n == 0 {
+                    // File shrank under us: end the stream.
+                    this.remaining = 0;
+                    return Poll::Ready(None);
+                }
+                this.remaining -= n as u64;
+                let data = Bytes::copy_from_slice(read_buf.filled());
+                Poll::Ready(Some(Ok(Frame::data(data))))
+            }
+            Poll::Ready(Err(e)) => {
+                // hyper::Error cannot be constructed from io::Error; end the
+                // stream and let hyper close the connection on length mismatch.
+                tracing::warn!(error = %e, "static file read error");
+                this.remaining = 0;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+/// Wraps an opened file into a streaming boxed body.
+pub fn file_box(file: File, len: u64) -> BoxBody<Bytes, hyper::Error> {
+    FileBody::new(file, len).boxed()
 }

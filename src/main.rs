@@ -20,10 +20,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use mimalloc::MiMalloc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::error;
 
 use crate::config::Config;
+
+/// Fast, thread-caching allocator tuned for many short-lived allocations.
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 /// SNI router & hybrid reverse proxy: :443 -> Xray / L7 / Caddy.
 #[derive(Debug, Parser)]
@@ -255,23 +260,43 @@ async fn main() {
 }
 
 /// Bind every address from `listen`.
+///
+/// On Unix each address gets `SO_REUSEPORT` fan-out (one listener per worker),
+/// so the kernel can spread `accept()` across cores instead of funneling every
+/// new connection through a single accept task.
 async fn bind_all(cfg: &Config) -> std::io::Result<Vec<TcpListener>> {
+    let fanout = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
     let mut out = Vec::new();
     for addr in &cfg.listen {
-        match bind_one(*addr) {
-            Ok(l) => out.push(l),
-            Err(e) if !cfg.strict_listen => {
-                error!(listen = %addr, error = %e, "bind failed, skipping (strict_listen=false)");
-            }
-            Err(e) => {
-                return Err(e);
+        let mut bound = 0usize;
+        for _ in 0..fanout {
+            match bind_one(*addr, fanout > 1) {
+                Ok(l) => {
+                    out.push(l);
+                    bound += 1;
+                }
+                Err(e) => {
+                    if bound == 0 {
+                        if !cfg.strict_listen {
+                            error!(listen = %addr, error = %e, "bind failed, skipping (strict_listen=false)");
+                            break;
+                        }
+                        return Err(e);
+                    }
+                    // SO_REUSEPORT unsupported or the fd limit was reached:
+                    // keep the listeners we already bound.
+                    break;
+                }
             }
         }
     }
     Ok(out)
 }
 
-fn bind_one(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+fn bind_one(addr: std::net::SocketAddr, reuse_port: bool) -> std::io::Result<TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
 
     let domain = if addr.is_ipv4() {
@@ -281,6 +306,10 @@ fn bind_one(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
     };
     let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     sock.set_reuse_address(true)?;
+    #[cfg(unix)]
+    if reuse_port {
+        let _ = sock.set_reuse_port(true);
+    }
     if addr.is_ipv6() {
         sock.set_only_v6(true)?;
     }

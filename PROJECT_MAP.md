@@ -6,11 +6,11 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 
 ### Rust proxy
 
-- `src/main.rs` — Binary entry point: parses CLI (`--config` / `PENIK_CONFIG`), loads config, inits logging, binds dual-stack listeners via `socket2` (`IPV6_V6ONLY`), and runs accept loops with graceful shutdown.
+- `src/main.rs` — Binary entry point: parses CLI (`--config` / `PENIK_CONFIG`), loads config, inits logging, installs mimalloc as the global allocator, binds dual-stack listeners via `socket2` (`IPV6_V6ONLY`) with `SO_REUSEPORT` accept fan-out across workers, and runs accept loops with graceful shutdown.
 - `src/config.rs` — Loads and validates TOML configuration: listen sockets, timeouts, log flags, named backends (`addr` + `send_proxy_protocol`), `default_backend`, and normalized `SNI -> backend` routes.
 - `src/sni.rs` — TLS ClientHello SNI parser: extracts first `host_name` from extension `0x0000` without terminating TLS; ASCII case-folds, trims trailing dot, rejects malformed input with `None`.
 - `src/proxy_proto.rs` — PROXY protocol v2 encoder: builds `PROXY` headers for IPv4/IPv6 (with `to_canonical()` for mapped addresses) and `LOCAL` fallback for mixed families.
-- `src/relay.rs` — Per-connection handler: read-loop sniffs first record (fast-path for non-TLS), routes by SNI, connects to backend, writes optional PPv2 header plus buffered bytes, then forwards via zero-copy Linux `splice(2)` (`tokio-splice2`).
+- `src/relay.rs` — Per-connection handler: pooled read-loop sniffs first record (fast-path for non-TLS), routes by SNI (stack-encoded PPv2, borrowed backend), connects to backend, writes optional PPv2 header plus buffered bytes, then forwards via zero-copy Linux `splice(2)` (`tokio-splice2`).
 - `src/logging.rs` — Tracing setup: quiet `error` default, lifts to `info` when `access_log` is enabled so per-connection lines are visible.
 - `src/caddyfile/mod.rs` — Caddyfile module root, directory loader, and integration tests.
 - `src/caddyfile/model.rs` — AST data structures for Caddyfile site blocks, directives, upstreams, and matchers.
@@ -23,10 +23,10 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/acme/alpn_challenge.rs` — Ephemeral TLS-ALPN-01 challenge certificate manager (RFC 8737).
 - `src/acme/store.rs` — Certificate persistence with 0600 file permissions, X.509 notAfter expiration parsing, SAN domain coverage validation, and apex loading.
 - `src/acme/manager.rs` — High-level ACME order manager with singleflight mutex, unified multi-SAN ordering, partitioning fallback with coverage checks, and TLS-ALPN-01 fallback for missing DNS zones.
-- `src/l7/mod.rs` — Layer-7 reverse proxy and static asset HTTP server engine.
+- `src/l7/mod.rs` — Layer-7 reverse proxy and static asset HTTP server engine, including streaming `FileBody` for static responses.
 - `src/l7/proxy.rs` — Upstream HTTP/HTTPS reverse proxy forwarder with WebSocket upgrade and X-Accel-Redirect interception.
 - `src/l7/service.rs` — Request dispatcher handling handle blocks ordering, handle_path, try_files, handle_errors, respond, request_body 413 limits, response headers, gzip compression (`encode gzip`), and L7 access logging.
-- `src/l7/static_files.rs` — Static file server with traversal protection, MIME detection, hide rules, ETag / Last-Modified caching (304), and byte range streaming (206/416).
+- `src/l7/static_files.rs` — Static file server with traversal protection, MIME detection, hide rules, ETag / Last-Modified caching (304), streamed full responses, and seek-based byte range reads (206/416).
 - `src/tls/mod.rs` — TLS server configuration and PEM parsing utilities.
 - `src/tls/resolver.rs` — Dynamic SNI-based TLS certificate resolver with apex domain grouping and hot-reloading support.
 - `src/lua/mod.rs` — Lua runtime integration root.
@@ -34,7 +34,8 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/lua/context.rs` — Per-request context bindings (`vane.req.*`), Rust-backed cross-phase `vane.ctx` UserData facade, response mutations (`vane.header`, `vane.status`, `vane.say`), `vane.exit()` signal unwinding, and isolated `_ENV` sandboxing.
 - `src/lua/shared_dict.rs` — Thread-safe in-memory key-value dictionary shared across all requests and VM instances (`vane.shared.DICT`).
 - `src/watcher.rs` — Zero-downtime hot reload coordinator with configurable periodic renewal interval, SIGHUP, and 500ms debounce.
-- `Cargo.toml` — Package manifest: `vane` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` dependencies.
+- `Cargo.toml` — Package manifest: `vane` binary, `tokio` / `socket2` / `clap` / `serde` / `toml` / `tracing` / `thiserror` / `mimalloc` dependencies, zlib-ng gzip backend, and LTO release profile.
+- `.cargo/config.toml` — Cargo aliases `build-i9` / `build-xeon` (Skylake / Broadwell, fat LTO) and `build-i9-fast` / `build-xeon-fast` (thin LTO for fast iteration) with explicit `target-cpu` / `target-feature` flags.
 - `Cargo.lock` — Pinned dependency tree for reproducible builds.
 - `vane.service` — Hardened systemd service unit with `CAP_NET_BIND_SERVICE` running as unprivileged `vane` user.
 - `vane_yandere.py` — Parody single-file Python port of Vane L4 core in YandereDev style: giant if/elif chains, globals, magic strings, duplicated PPv2 encoders, Update() polling loop.

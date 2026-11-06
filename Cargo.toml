@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -38,11 +38,12 @@ arc-swap = "1"
 notify = "8"
 x509-parser = "0.18"
 rustls-native-certs = "0.8"
-flate2 = "1.1.10"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
 addr = "0.15.6"
 crossbeam-queue = "0.3"
 mlua = { version = "0.10", features = ["luajit", "vendored", "async", "send"] }
 tokio-splice2 = "0.3.2"
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -51,3 +52,9 @@ tokio = { version = "1", features = ["full"] }
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+# Same optimizations, but parallel codegen and thin LTO for fast iteration.
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
