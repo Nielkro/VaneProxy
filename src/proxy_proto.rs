@@ -8,50 +8,74 @@ use std::net::{IpAddr, SocketAddr};
 /// 12-byte v2 signature: \r\n\r\n\0\r\nQUIT\n
 const SIGNATURE: &[u8; 12] = b"\r\n\r\n\x00\r\nQUIT\n";
 
+/// Fixed-capacity PROXY v2 header (max 52 bytes) kept entirely on the stack.
+pub struct Ppv2Header {
+    buf: [u8; 52],
+    len: usize,
+}
+
+impl Ppv2Header {
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl std::ops::Deref for Ppv2Header {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
 /// Encode a PROXY protocol v2 header for a proxied TCP connection.
 ///
 /// Both addresses are canonicalized (`to_canonical`), so IPv4-mapped
 /// IPv6 becomes plain IPv4. Mixed families or non-TCP fall back to
 /// the minimal `LOCAL` (health-check) header so the backend never stalls.
-pub fn encode_ppv2(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+pub fn encode_ppv2(src: SocketAddr, dst: SocketAddr) -> Ppv2Header {
     let src_c = canonical(src);
     let dst_c = canonical(dst);
+    let mut hdr = Ppv2Header {
+        buf: [0u8; 52],
+        len: 16,
+    };
+
+    hdr.buf[..12].copy_from_slice(SIGNATURE);
 
     match (src_c.ip(), dst_c.ip()) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
-            let mut out = Vec::with_capacity(28);
-            out.extend_from_slice(SIGNATURE);
-            out.push(0x21); // version 2 + PROXY command
-            out.push(0x11); // AF_INET + STREAM
-            out.extend_from_slice(&12u16.to_be_bytes());
-            out.extend_from_slice(&s.octets());
-            out.extend_from_slice(&d.octets());
-            out.extend_from_slice(&src_c.port().to_be_bytes());
-            out.extend_from_slice(&dst_c.port().to_be_bytes());
-            out
+            hdr.buf[12] = 0x21; // version 2 + PROXY command
+            hdr.buf[13] = 0x11; // AF_INET + STREAM
+            hdr.buf[14..16].copy_from_slice(&12u16.to_be_bytes());
+            hdr.buf[16..20].copy_from_slice(&s.octets());
+            hdr.buf[20..24].copy_from_slice(&d.octets());
+            hdr.buf[24..26].copy_from_slice(&src_c.port().to_be_bytes());
+            hdr.buf[26..28].copy_from_slice(&dst_c.port().to_be_bytes());
+            hdr.len = 28;
         }
         (IpAddr::V6(s), IpAddr::V6(d)) => {
-            let mut out = Vec::with_capacity(52);
-            out.extend_from_slice(SIGNATURE);
-            out.push(0x21);
-            out.push(0x21); // AF_INET6 + STREAM
-            out.extend_from_slice(&36u16.to_be_bytes());
-            out.extend_from_slice(&s.octets());
-            out.extend_from_slice(&d.octets());
-            out.extend_from_slice(&src_c.port().to_be_bytes());
-            out.extend_from_slice(&dst_c.port().to_be_bytes());
-            out
+            hdr.buf[12] = 0x21;
+            hdr.buf[13] = 0x21; // AF_INET6 + STREAM
+            hdr.buf[14..16].copy_from_slice(&36u16.to_be_bytes());
+            hdr.buf[16..32].copy_from_slice(&s.octets());
+            hdr.buf[32..48].copy_from_slice(&d.octets());
+            hdr.buf[48..50].copy_from_slice(&src_c.port().to_be_bytes());
+            hdr.buf[50..52].copy_from_slice(&dst_c.port().to_be_bytes());
+            hdr.len = 52;
         }
         // Mixed families: send LOCAL so the receiver skips address parsing.
         _ => {
-            let mut out = Vec::with_capacity(16);
-            out.extend_from_slice(SIGNATURE);
-            out.push(0x20); // version 2 + LOCAL command
-            out.push(0x00); // UNSPEC
-            out.extend_from_slice(&0u16.to_be_bytes());
-            out
+            hdr.buf[12] = 0x20; // version 2 + LOCAL command
+            hdr.buf[13] = 0x00; // UNSPEC
+            hdr.buf[14..16].copy_from_slice(&0u16.to_be_bytes());
+            hdr.len = 16;
         }
     }
+
+    hdr
 }
 
 fn canonical(addr: SocketAddr) -> SocketAddr {

@@ -4,19 +4,20 @@
 //! Never panics on untrusted input: any truncation or malformed
 //! structure yields `None`, and the caller routes to the default backend.
 
-/// Parsed ClientHello metadata: SNI and ALPN protocols.
+/// Parsed ClientHello metadata: SNI and the ACME ALPN flag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClientHelloInfo {
     /// Normalized SNI, if present.
     pub sni: Option<String>,
-    /// Negotiated ALPN protocol names, if present.
-    pub alpn: Vec<String>,
+    /// True when the client requested the ACME TLS-ALPN-01 protocol (`acme-tls/1`).
+    pub acme_tls_alpn: bool,
 }
 
 impl ClientHelloInfo {
     /// Returns true if the client requested the ACME TLS-ALPN-01 protocol (`acme-tls/1`).
+    #[inline]
     pub fn is_acme_tls_alpn(&self) -> bool {
-        self.alpn.iter().any(|p| p == "acme-tls/1")
+        self.acme_tls_alpn
     }
 }
 
@@ -93,10 +94,10 @@ pub fn parse_client_hello(buf: &[u8]) -> ClientHelloInfo {
         let data_end = (cur.pos + ext_len).min(ext_end);
         if ext_type == 0x0000 {
             if let Some(name) = parse_server_name(cur.data, cur.pos, data_end) {
-                info.sni = normalize_sni(&name);
+                info.sni = normalize_sni(name);
             }
         } else if ext_type == 0x0010 {
-            info.alpn = parse_alpn(cur.data, cur.pos, data_end);
+            info.acme_tls_alpn = has_acme_alpn(cur.data, cur.pos, data_end);
         }
         cur.pos = data_end;
     }
@@ -104,14 +105,14 @@ pub fn parse_client_hello(buf: &[u8]) -> ClientHelloInfo {
     info
 }
 
-fn parse_alpn(data: &[u8], start: usize, end: usize) -> Vec<String> {
+fn has_acme_alpn(data: &[u8], start: usize, end: usize) -> bool {
+    const ACME: &[u8] = b"acme-tls/1";
     if end > data.len() || start + 2 > end {
-        return Vec::new();
+        return false;
     }
     let list_len = u16::from_be_bytes([data[start], data[start + 1]]) as usize;
     let mut pos = start + 2;
     let list_end = (pos + list_len).min(end);
-    let mut protocols = Vec::new();
 
     while pos < list_end {
         let proto_len = data[pos] as usize;
@@ -119,19 +120,19 @@ fn parse_alpn(data: &[u8], start: usize, end: usize) -> Vec<String> {
         if pos + proto_len > list_end {
             break;
         }
-        if let Ok(proto) = std::str::from_utf8(&data[pos..pos + proto_len]) {
-            protocols.push(proto.to_string());
+        if proto_len == ACME.len() && data[pos..pos + proto_len] == *ACME {
+            return true;
         }
         pos += proto_len;
     }
 
-    protocols
+    false
 }
 
 /// Parse the ServerNameList inside extension 0x0000.
 ///
 /// Returns the first entry with name type 0 (host_name).
-fn parse_server_name(data: &[u8], start: usize, end: usize) -> Option<Vec<u8>> {
+fn parse_server_name<'a>(data: &'a [u8], start: usize, end: usize) -> Option<&'a [u8]> {
     if end > data.len() || start + 2 > end {
         return None;
     }
@@ -147,7 +148,7 @@ fn parse_server_name(data: &[u8], start: usize, end: usize) -> Option<Vec<u8>> {
             return None;
         }
         if name_type == 0 {
-            return Some(data[pos..name_end].to_vec());
+            return Some(&data[pos..name_end]);
         }
         pos = name_end;
     }
@@ -160,23 +161,25 @@ pub fn normalize_sni(raw: &[u8]) -> Option<String> {
     if raw.is_empty() || raw.len() > 253 {
         return None;
     }
-    let mut out = Vec::with_capacity(raw.len());
+    let mut out = [0u8; 253];
+    let mut len = 0;
     for &b in raw {
         // Reject NUL, non-ASCII, controls, space and DEL.
         if b == 0 || !(0x21..=0x7e).contains(&b) {
             return None;
         }
-        out.push(b.to_ascii_lowercase());
+        out[len] = b.to_ascii_lowercase();
+        len += 1;
     }
     // Strip a single trailing dot ("example.com." -> "example.com").
-    if out.len() > 1 && out[out.len() - 1] == b'.' {
-        out.pop();
+    if len > 1 && out[len - 1] == b'.' {
+        len -= 1;
     }
-    if out.is_empty() {
+    if len == 0 {
         return None;
     }
     // Safe: validated ASCII above.
-    String::from_utf8(out).ok()
+    String::from_utf8(out[..len].to_vec()).ok()
 }
 
 /// Simple bounds-checked cursor over a byte slice.

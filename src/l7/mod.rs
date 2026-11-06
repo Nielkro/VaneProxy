@@ -22,7 +22,7 @@ pub use service::{extract_request_host, handle_site_request, resolve_site_for_re
 pub async fn serve_l7_stream<S>(
     stream: S,
     sites: Arc<Vec<SiteBlock>>,
-    default_site: Arc<SiteBlock>,
+    default_site_index: usize,
     peer_addr: SocketAddr,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -32,10 +32,10 @@ pub async fn serve_l7_stream<S>(
 
     let service = service_fn(move |req| {
         let sites_ref = Arc::clone(&sites);
-        let default_site_ref = Arc::clone(&default_site);
         async move {
             let host = extract_request_host(&req);
-            let site = resolve_site_for_request(&sites_ref, &host, &default_site_ref);
+            let default_site = &sites_ref[default_site_index];
+            let site = resolve_site_for_request(&sites_ref, &host, default_site);
             handle_site_request(req, site, peer_addr).await
         }
     });

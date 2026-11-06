@@ -146,17 +146,23 @@ pub fn consolidate_sans_with_managed_apexes(
 /// wildcard matching (`*.example.com` matches `foo.example.com`, but not
 /// `example.com` or `bar.foo.example.com`).
 pub fn matches_site_address(pattern: &str, sni: &str) -> bool {
-    let pat = pattern.trim().to_lowercase();
-    let s = sni.trim().to_lowercase();
+    let pat = pattern.trim().as_bytes();
+    let s = sni.trim().as_bytes();
 
-    if pat == s {
+    // Fast path: exact match, allocation-free ASCII case fold.
+    if pat.eq_ignore_ascii_case(s) {
         return true;
     }
 
-    if let Some(suffix) = pat.strip_prefix("*.") {
-        if let Some(prefix) = s.strip_suffix(suffix) {
-            if prefix.ends_with('.') && !prefix[..prefix.len() - 1].contains('.') && !prefix[..prefix.len() - 1].is_empty() {
-                return true;
+    // Wildcard: `*.example.com` matches exactly one leading label.
+    if let Some(suffix) = pat.strip_prefix(b"*.") {
+        if s.len() > suffix.len() && s[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix) {
+            let prefix = &s[..s.len() - suffix.len()];
+            if prefix.ends_with(b".") {
+                let label = &prefix[..prefix.len() - 1];
+                if !label.is_empty() && !label.contains(&b'.') {
+                    return true;
+                }
             }
         }
     }

@@ -168,7 +168,7 @@ where
     }
 
     // 3. Find matching handle block (by file order)
-    let mut chosen_directives: Option<Vec<Directive>> = None;
+    let mut chosen_directives: Option<&[Directive]> = None;
     let top_root = site.directives.iter().find_map(|d| match d {
         Directive::Root(p) => Some(PathBuf::from(p)),
         _ => None,
@@ -182,7 +182,7 @@ where
                     None => true, // catch-all handle
                 };
                 if matched {
-                    chosen_directives = Some(hb.directives.clone());
+                    chosen_directives = Some(&hb.directives);
                     break;
                 }
             }
@@ -201,7 +201,7 @@ where
                     if let Ok(new_uri) = format!("{}{}", new_path, query).parse::<Uri>() {
                         *req.uri_mut() = new_uri;
                     }
-                    chosen_directives = Some(hp.directives.clone());
+                    chosen_directives = Some(&hp.directives);
                     break;
                 }
             }
@@ -210,17 +210,17 @@ where
     }
 
     // Directives to execute for this request
-    let active_directives = chosen_directives.unwrap_or_else(|| site.directives.clone());
+    let active_directives: &[Directive] = chosen_directives.unwrap_or(&site.directives);
 
     // Execute the active block pipeline
-    let mut resp = execute_directive_pipeline(req, &active_directives, &matchers, peer_addr, &host_header, top_root.as_deref()).await?;
+    let mut resp = execute_directive_pipeline(req, active_directives, &matchers, peer_addr, &host_header, top_root.as_deref()).await?;
 
     // Apply response headers defined at site or block level
     let placeholder_ctx = initial_ctx.with_upstream_headers(resp.headers());
 
     apply_response_headers(&mut resp, &site.directives, &matchers, &placeholder_ctx);
-    if active_directives != site.directives {
-        apply_response_headers(&mut resp, &active_directives, &matchers, &placeholder_ctx);
+    if active_directives != site.directives.as_slice() {
+        apply_response_headers(&mut resp, active_directives, &matchers, &placeholder_ctx);
     }
 
     // 6. Handle errors if status is 4xx or 5xx and handle_errors is declared
@@ -1261,8 +1261,8 @@ mod tests {
         let site_a = sites.iter().find(|s| s.addresses.contains(&"site-a.example.com".to_string())).unwrap().clone();
         let site_b = sites.iter().find(|s| s.addresses.contains(&"site-b.example.com".to_string())).unwrap().clone();
 
-        let sites_arc = Arc::new(vec![site_a.clone(), site_b.clone()]);
-        let default_site_arc = Arc::new(site_a.clone());
+        let sites_arc = Arc::new(vec![site_a, site_b]);
+        let default_site_index = 0usize;
 
         let (client_io, server_io) = tokio::io::duplex(8192);
         let peer_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
         tokio::spawn(crate::l7::serve_l7_stream(
             server_io,
             sites_arc,
-            default_site_arc,
+            default_site_index,
             peer_addr,
         ));
 

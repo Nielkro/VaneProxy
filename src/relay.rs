@@ -194,7 +194,8 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     let max_bytes = cfg.max_client_hello_bytes;
 
     // Read the first TLS record (or whatever the client sent) with a deadline.
-    let mut buf = Vec::with_capacity(2048);
+    // Cap the upfront allocation: most ClientHellos fit in a single 4 KiB read.
+    let mut buf = Vec::with_capacity(max_bytes.min(4096));
     let read_ok =
         tokio::time::timeout(hello_timeout, read_hello(&mut inbound, &mut buf, max_bytes))
             .await
@@ -241,25 +242,24 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
         // 2. Check L7 sites in sites-enabled/
         if let Some(sni_name) = sni.as_deref() {
             let sites = state.sites();
-            let matched_site = sites.iter().find(|site| {
+            let matched_index = sites.iter().position(|site| {
                 site.addresses
                     .iter()
                     .any(|addr| matches_site_address(addr, sni_name))
             });
 
-            if let Some(site) = matched_site {
+            if let Some(site_index) = matched_index {
                 let acceptor_opt = state.tls_acceptor.load();
                 if let Some(acceptor) = acceptor_opt.as_ref() {
                     let prefixed = PrefixedStream::new(buf, inbound);
                     let acceptor = acceptor.clone();
-                    let site_arc = Arc::new(site.clone());
                     let sites_arc = Arc::clone(&sites);
                     let peer_addr = peer.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
                     let sni_owned = sni_name.to_string();
                     tokio::spawn(async move {
                         match acceptor.accept(prefixed).await {
                             Ok(tls_stream) => {
-                                serve_l7_stream(tls_stream, sites_arc, site_arc, peer_addr).await;
+                                serve_l7_stream(tls_stream, sites_arc, site_index, peer_addr).await;
                             }
                             Err(e) => {
                                 let err_str = e.to_string();
@@ -283,11 +283,10 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     }
 
     // 3. Fallback: route to L4 backend or default_backend
-    let backend_name = l4_backend_name
+    let backend_name: &str = l4_backend_name
         .map(|s| s.as_str())
-        .unwrap_or_else(|| &cfg.default_backend)
-        .to_string();
-    let backend = cfg.backend(&backend_name).clone();
+        .unwrap_or(cfg.default_backend.as_str());
+    let backend = cfg.backend(backend_name);
 
     // Connect to the chosen backend (TCP or Unix socket).
     let connect_timeout = Duration::from_millis(cfg.backend_connect_timeout_ms);
@@ -303,7 +302,7 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     if backend.send_proxy_protocol {
         if let (Some(p), Some(l)) = (peer, local) {
             let hdr = encode_ppv2(p, l);
-            if let Err(e) = upstream.write_all(&hdr).await {
+            if let Err(e) = upstream.write_all(hdr.as_slice()).await {
                 warn!(?peer, backend = %backend_name, error = %e, "ppv2 write failed");
                 return;
             }
