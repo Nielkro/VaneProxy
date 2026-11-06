@@ -20,6 +20,9 @@ use crate::l7::serve_l7_stream;
 use crate::proxy_proto::encode_ppv2;
 use crate::sni::parse_client_hello;
 
+mod routing;
+use routing::{decide, RouteDecision};
+
 /// Initial ClientHello buffer size, and the max capacity worth recycling.
 const HELLO_BUF_CAP: usize = 4096;
 const HELLO_BUF_MAX_RECYCLE: usize = HELLO_BUF_CAP * 4;
@@ -244,80 +247,94 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     let is_alpn = hello_info.is_acme_tls_alpn();
     let sni = hello_info.sni;
 
-    // 0. Check ACME TLS-ALPN-01 challenge probe
-    if is_alpn {
-        if let Some(sni_name) = sni.as_deref() {
-            if state.alpn_registry.get_challenge(sni_name).is_some() {
-                debug!(sni = %sni_name, "handling ACME TLS-ALPN-01 probe");
-                if let Some(acceptor) = state.tls_acceptor.load().as_ref() {
-                    let prefixed = PrefixedStream::new(buf, inbound);
-                    let acceptor = acceptor.clone();
-                    let sni_owned = sni_name.to_string();
-                    tokio::spawn(async move {
-                        match acceptor.accept(prefixed).await {
-                            Ok(mut stream) => {
-                                let _ = stream.shutdown().await;
-                            }
-                            Err(e) => {
-                                warn!(sni = %sni_owned, error = %e, "TLS-ALPN-01 handshake failed");
+    let index = state.site_index();
+    let has_tls_acceptor = state.tls_acceptor.load().is_some();
+    let alpn_challenge_present = is_alpn
+        && sni
+            .as_deref()
+            .map_or(false, |name| state.alpn_registry.get_challenge(name).is_some());
+
+    let decision = decide(
+        sni.as_deref(),
+        is_alpn,
+        alpn_challenge_present,
+        has_tls_acceptor,
+        &cfg.routes,
+        &index,
+    );
+
+    // Resolve the route: ACME ALPN, L7 site, explicit L4 route, or default.
+    let l4_backend_name: Option<&str> = match decision {
+        RouteDecision::AcmeAlpn => {
+            let sni_name = sni.as_deref().unwrap_or_default();
+            debug!(sni = %sni_name, "handling ACME TLS-ALPN-01 probe");
+            let acceptor_opt = state.tls_acceptor.load();
+            if let Some(acceptor) = acceptor_opt.as_ref() {
+                let prefixed = PrefixedStream::new(buf, inbound);
+                let acceptor = acceptor.clone();
+                let sni_owned = sni_name.to_string();
+                tokio::spawn(async move {
+                    match acceptor.accept(prefixed).await {
+                        Ok(mut stream) => {
+                            let _ = stream.shutdown().await;
+                        }
+                        Err(e) => {
+                            warn!(sni = %sni_owned, error = %e, "TLS-ALPN-01 handshake failed");
+                        }
+                    }
+                });
+                return;
+            }
+            None
+        }
+        RouteDecision::L7(site_idx) => {
+            let sni_name = sni.as_deref().unwrap_or_default();
+            let acceptor_opt = state.tls_acceptor.load();
+            if let Some(acceptor) = acceptor_opt.as_ref() {
+                let sites = state.sites();
+                let prefixed = PrefixedStream::new(buf, inbound);
+                let acceptor = acceptor.clone();
+                let sites_arc = Arc::clone(&sites);
+                let peer_addr = peer.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
+                let sni_owned = sni_name.to_string();
+                let site_index_arc = Arc::clone(&index);
+                tokio::spawn(async move {
+                    match acceptor.accept(prefixed).await {
+                        Ok(tls_stream) => {
+                            serve_l7_stream(
+                                tls_stream,
+                                sites_arc,
+                                site_index_arc,
+                                site_idx,
+                                peer_addr,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("unexpected-eof")
+                                || err_str.contains("close_notify")
+                                || err_str.contains("NoCipherSuitesInCommon")
+                                || err_str.contains("Tls12NotOffered")
+                                || err_str.contains("tls handshake eof")
+                            {
+                                debug!(sni = %sni_owned, error = %e, "TLS handshake closed or incompatible scanner probe");
+                            } else {
+                                warn!(sni = %sni_owned, error = %e, "TLS handshake failed for L7 site");
                             }
                         }
-                    });
-                    return;
-                }
+                    }
+                });
+                return;
             }
+            None
         }
-    }
-
-    // 1. Check L4 passthrough routes in config.toml
-    let l4_backend_name = sni.as_deref().and_then(|s| cfg.routes.get(s));
-
-    if l4_backend_name.is_none() {
-        // 2. Check L7 sites in sites-enabled/ via the precomputed host index.
-        if let Some(sni_name) = sni.as_deref() {
-            let index = state.site_index();
-            let matched_index = index.lookup(sni_name);
-
-            if let Some(site_index) = matched_index {
-                let acceptor_opt = state.tls_acceptor.load();
-                if let Some(acceptor) = acceptor_opt.as_ref() {
-                    let sites = state.sites();
-                    let prefixed = PrefixedStream::new(buf, inbound);
-                    let acceptor = acceptor.clone();
-                    let sites_arc = Arc::clone(&sites);
-                    let peer_addr = peer.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-                    let sni_owned = sni_name.to_string();
-                    tokio::spawn(async move {
-                        match acceptor.accept(prefixed).await {
-                            Ok(tls_stream) => {
-                                serve_l7_stream(tls_stream, sites_arc, index, site_index, peer_addr)
-                                    .await;
-                            }
-                            Err(e) => {
-                                let err_str = e.to_string();
-                                if err_str.contains("unexpected-eof")
-                                    || err_str.contains("close_notify")
-                                    || err_str.contains("NoCipherSuitesInCommon")
-                                    || err_str.contains("Tls12NotOffered")
-                                    || err_str.contains("tls handshake eof")
-                                {
-                                    debug!(sni = %sni_owned, error = %e, "TLS handshake closed or incompatible scanner probe");
-                                } else {
-                                    warn!(sni = %sni_owned, error = %e, "TLS handshake failed for L7 site");
-                                }
-                            }
-                        }
-                    });
-                    return;
-                }
-            }
-        }
-    }
+        RouteDecision::L4(name) => Some(name),
+        RouteDecision::Default => None,
+    };
 
     // 3. Fallback: route to L4 backend or default_backend
-    let backend_name: &str = l4_backend_name
-        .map(|s| s.as_str())
-        .unwrap_or(cfg.default_backend.as_str());
+    let backend_name: &str = l4_backend_name.unwrap_or(cfg.default_backend.as_str());
     let backend = cfg.backend(backend_name);
 
     // Connect to the chosen backend (TCP or Unix socket).

@@ -10,7 +10,9 @@ Map of core source files for the PenikProxy project. Paths are relative to the p
 - `src/config.rs` — Loads and validates TOML configuration: listen sockets, timeouts, log flags, named backends (`addr` + `send_proxy_protocol`), `default_backend`, and normalized `SNI -> backend` routes.
 - `src/sni.rs` — TLS ClientHello SNI parser: extracts first `host_name` from extension `0x0000` without terminating TLS; ASCII case-folds, trims trailing dot, rejects malformed input with `None`.
 - `src/proxy_proto.rs` — PROXY protocol v2 encoder: builds `PROXY` headers for IPv4/IPv6 (with `to_canonical()` for mapped addresses) and `LOCAL` fallback for mixed families.
-- `src/relay.rs` — Per-connection handler: pooled read-loop sniffs first record (fast-path for non-TLS), routes by SNI (stack-encoded PPv2, borrowed backend), connects to backend, writes optional PPv2 header plus buffered bytes, then forwards via zero-copy Linux `splice(2)` (`tokio-splice2`).
+- `src/relay/` — Per-connection handling:
+  - `mod.rs` — runtime state (`RuntimeState`), pooled ClientHello read-loop, prefixed stream, upstream connect, PPv2 preface and zero-copy `splice(2)` relay (`tokio-splice2`).
+  - `routing.rs` — pure `decide()` returning `RouteDecision` (ACME ALPN → L4 exact → L7 site → default) with unit tests.
 - `src/logging.rs` — Tracing setup: quiet `error` default, lifts to `info` when `access_log` is enabled so per-connection lines are visible.
 - `src/caddyfile/mod.rs` — Caddyfile module root, directory loader, and integration tests.
 - `src/caddyfile/model.rs` — AST data structures for Caddyfile site blocks, directives, upstreams, and matchers.
