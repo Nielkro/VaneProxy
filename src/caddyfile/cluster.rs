@@ -1,6 +1,73 @@
 //! Domain clustering, apex extraction, and SAN consolidation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use crate::caddyfile::model::SiteBlock;
+
+/// Precomputed hostname -> site index lookup.
+///
+/// Exact hostnames take precedence over a single-level `*.suffix` wildcard,
+/// matching both SNI routing and per-request `Host` resolution.
+#[derive(Debug, Default)]
+pub struct SiteIndex {
+    exact: HashMap<String, usize>,
+    wildcards: HashMap<String, usize>,
+}
+
+impl SiteIndex {
+    /// Builds the index from site blocks. First occurrence wins on duplicates.
+    pub fn build(sites: &[SiteBlock]) -> Self {
+        let mut exact = HashMap::new();
+        let mut wildcards = HashMap::new();
+
+        for (idx, site) in sites.iter().enumerate() {
+            for addr in &site.addresses {
+                let name = addr.trim().trim_end_matches('.');
+                if name.is_empty() {
+                    continue;
+                }
+                if let Some(suffix) = name.strip_prefix("*.") {
+                    wildcards
+                        .entry(suffix.to_ascii_lowercase())
+                        .or_insert(idx);
+                } else {
+                    exact.entry(name.to_ascii_lowercase()).or_insert(idx);
+                }
+            }
+        }
+
+        Self { exact, wildcards }
+    }
+
+    /// Looks up a hostname (optionally with port) and returns the site index.
+    #[inline]
+    pub fn lookup(&self, host: &str) -> Option<usize> {
+        let host = host.split(':').next().unwrap_or(host).trim();
+        let host = host.trim_end_matches('.');
+        if host.is_empty() {
+            return None;
+        }
+
+        let host: Cow<'_, str> = if host.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(host.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(host)
+        };
+
+        if let Some(idx) = self.exact.get(host.as_ref()) {
+            return Some(*idx);
+        }
+
+        if let Some(dot) = host.find('.') {
+            if let Some(idx) = self.wildcards.get(&host[dot + 1..]) {
+                return Some(*idx);
+            }
+        }
+
+        None
+    }
+}
 
 /// Extracts the apex (registrable) domain from a fully-qualified domain name
 /// using the Mozilla Public Suffix List (via `addr`), with fallback for multi-label domains.
@@ -168,4 +235,31 @@ pub fn matches_site_address(pattern: &str, sni: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn site(addresses: &[&str]) -> SiteBlock {
+        SiteBlock {
+            addresses: addresses.iter().map(|a| a.to_string()).collect(),
+            directives: Vec::new(),
+            source_file: None,
+            line: 0,
+        }
+    }
+
+    #[test]
+    fn site_index_prefers_exact_over_wildcard() {
+        let sites = vec![site(&["*.penik.ru"]), site(&["vpn.penik.ru"])];
+        let index = SiteIndex::build(&sites);
+
+        assert_eq!(index.lookup("vpn.penik.ru"), Some(1));
+        assert_eq!(index.lookup("VPN.PENIK.RU:443"), Some(1));
+        assert_eq!(index.lookup("other.penik.ru"), Some(0));
+        assert_eq!(index.lookup("deep.other.penik.ru"), None);
+        assert_eq!(index.lookup("penik.ru"), None);
+        assert_eq!(index.lookup(""), None);
+    }
 }

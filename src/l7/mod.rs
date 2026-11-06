@@ -19,6 +19,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::error;
 
+use crate::caddyfile::cluster::SiteIndex;
 use crate::caddyfile::model::SiteBlock;
 pub use service::{extract_request_host, handle_site_request, resolve_site_for_request};
 
@@ -29,6 +30,7 @@ pub use service::{extract_request_host, handle_site_request, resolve_site_for_re
 pub async fn serve_l7_stream<S>(
     stream: S,
     sites: Arc<Vec<SiteBlock>>,
+    site_index: Arc<SiteIndex>,
     default_site_index: usize,
     peer_addr: SocketAddr,
 ) where
@@ -39,10 +41,11 @@ pub async fn serve_l7_stream<S>(
 
     let service = service_fn(move |req| {
         let sites_ref = Arc::clone(&sites);
+        let index_ref = Arc::clone(&site_index);
         async move {
             let host = extract_request_host(&req);
             let default_site = &sites_ref[default_site_index];
-            let site = resolve_site_for_request(&sites_ref, &host, default_site);
+            let site = resolve_site_for_request(&sites_ref, &index_ref, &host, default_site);
             handle_site_request(req, site, peer_addr).await
         }
     });

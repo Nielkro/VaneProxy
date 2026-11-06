@@ -19,7 +19,7 @@ use http_body_util::combinators::BoxBody;
 use hyper::{header, HeaderMap, Method, Request, Response, StatusCode, Uri};
 use tracing::warn;
 
-use crate::caddyfile::cluster::matches_site_address;
+use crate::caddyfile::cluster::SiteIndex;
 use crate::caddyfile::model::{
     Directive, HeaderOp, MatcherDef, MatcherRule, SiteBlock, StatusOp,
 };
@@ -48,33 +48,14 @@ pub fn extract_request_host<B>(req: &Request<B>) -> String {
 /// 3. If no match is found, falls back to `default_site` (e.g. SNI site from TLS handshake).
 pub fn resolve_site_for_request<'a>(
     sites: &'a [SiteBlock],
+    index: &SiteIndex,
     host: &str,
     default_site: &'a SiteBlock,
 ) -> &'a SiteBlock {
-    let clean_host = host.split(':').next().unwrap_or(host).trim();
-    if !clean_host.is_empty() {
-        // 1. Exact matches first
-        for site in sites {
-            if site
-                .addresses
-                .iter()
-                .any(|addr| addr.eq_ignore_ascii_case(clean_host))
-            {
-                return site;
-            }
-        }
-        // 2. Wildcard / pattern matches second
-        for site in sites {
-            if site
-                .addresses
-                .iter()
-                .any(|addr| matches_site_address(addr, clean_host))
-            {
-                return site;
-            }
-        }
+    match index.lookup(host) {
+        Some(idx) => sites.get(idx).unwrap_or(default_site),
+        None => default_site,
     }
-    default_site
 }
 
 /// Handles an incoming HTTP request for a resolved site.
@@ -306,24 +287,38 @@ async fn maybe_compress_gzip(
         return Response::from_parts(parts, body);
     }
 
-    // Collect body bytes and compress using flate2
+    // Collect body bytes and compress using flate2.
     use http_body_util::BodyExt;
     let bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),
         Err(_) => return Response::from_parts(parts, crate::l7::empty_box()),
     };
 
-    use std::io::Write;
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    if encoder.write_all(&bytes).is_err() {
+    // Compression of tiny bodies costs more than it saves.
+    const MIN_GZIP_BYTES: usize = 1024;
+    if bytes.len() < MIN_GZIP_BYTES {
         return Response::from_parts(parts, crate::l7::full_box(bytes));
     }
-    let compressed = match encoder.finish() {
-        Ok(c) => c,
-        Err(_) => return Response::from_parts(parts, crate::l7::full_box(bytes)),
+
+    // gzip is CPU-bound: keep it off the async worker threads.
+    let original = bytes.clone();
+    let compressed = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        use std::io::Write;
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let mut encoder =
+            GzEncoder::new(Vec::with_capacity(bytes.len() / 2), Compression::default());
+        encoder.write_all(&bytes).ok()?;
+        encoder.finish().ok()
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let compressed = match compressed {
+        Some(c) => c,
+        None => return Response::from_parts(parts, crate::l7::full_box(original)),
     };
 
     parts.headers.insert(header::CONTENT_ENCODING, header::HeaderValue::from_static("gzip"));
@@ -1022,14 +1017,18 @@ mod tests {
         use std::io::Read;
         use flate2::read::GzDecoder;
 
-        let caddyfile = r#"
-            example.com {
+        // Above the minimum compression threshold.
+        let payload = "Hello Compressible World! ".repeat(100);
+        let caddyfile = format!(
+            r#"
+            example.com {{
                 encode gzip
                 header Content-Type "text/html; charset=utf-8"
-                respond "<html><body>Hello Compressible World!</body></html>" 200
-            }
-        "#;
-        let sites = parse_caddyfile(caddyfile, None).unwrap();
+                respond "{payload}" 200
+            }}
+        "#
+        );
+        let sites = parse_caddyfile(&caddyfile, None).unwrap();
         let site = &sites[0];
         let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
@@ -1043,7 +1042,7 @@ mod tests {
         let mut decoder = GzDecoder::new(&compressed_bytes[..]);
         let mut decompressed_str = String::new();
         decoder.read_to_string(&mut decompressed_str).unwrap();
-        assert_eq!(decompressed_str, "<html><body>Hello Compressible World!</body></html>");
+        assert_eq!(decompressed_str, payload);
 
         // 2. Client without Accept-Encoding receives plain body
         let req = make_request("GET", "/", &[]);
@@ -1051,7 +1050,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!resp.headers().contains_key("content-encoding"));
         let plain_bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(plain_bytes, "<html><body>Hello Compressible World!</body></html>");
+        assert_eq!(&plain_bytes[..], payload.as_bytes());
     }
 
     #[tokio::test]
@@ -1208,38 +1207,39 @@ mod tests {
             }
         "#;
         let sites = parse_caddyfile(caddyfile, None).unwrap();
+        let index = SiteIndex::build(&sites);
         let fallback_site = sites.iter().find(|s| s.addresses.contains(&"fallback.example.net".to_string())).unwrap();
 
         // 1. Exact match on primary domain
-        let resolved = resolve_site_for_request(&sites, "site-a.example.com", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "site-a.example.com", fallback_site);
         assert_eq!(resolved.addresses, vec!["site-a.example.com"]);
 
         // 2. Exact match with port stripped
-        let resolved = resolve_site_for_request(&sites, "site-a.example.com:443", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "site-a.example.com:443", fallback_site);
         assert_eq!(resolved.addresses, vec!["site-a.example.com"]);
 
         // 3. Exact match on secondary domain
-        let resolved = resolve_site_for_request(&sites, "alt-b.example.com:8443", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "alt-b.example.com:8443", fallback_site);
         assert_eq!(resolved.addresses, vec!["site-b.example.com", "alt-b.example.com"]);
 
         // 4. Case-insensitive exact match
-        let resolved = resolve_site_for_request(&sites, "SITE-B.EXAMPLE.COM", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "SITE-B.EXAMPLE.COM", fallback_site);
         assert_eq!(resolved.addresses, vec!["site-b.example.com", "alt-b.example.com"]);
 
         // 5. Precedence: exact match over wildcard match
-        let resolved = resolve_site_for_request(&sites, "exact.example.org", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "exact.example.org", fallback_site);
         assert_eq!(resolved.addresses, vec!["exact.example.org"]);
 
         // 6. Wildcard match
-        let resolved = resolve_site_for_request(&sites, "other.example.org", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "other.example.org", fallback_site);
         assert_eq!(resolved.addresses, vec!["*.example.org"]);
 
         // 7. Unknown host falls back to default_site
-        let resolved = resolve_site_for_request(&sites, "unknown.example.com", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "unknown.example.com", fallback_site);
         assert_eq!(resolved.addresses, vec!["fallback.example.net"]);
 
         // 8. Empty host falls back to default_site
-        let resolved = resolve_site_for_request(&sites, "", fallback_site);
+        let resolved = resolve_site_for_request(&sites, &index, "", fallback_site);
         assert_eq!(resolved.addresses, vec!["fallback.example.net"]);
     }
 
@@ -1261,7 +1261,9 @@ mod tests {
         let site_a = sites.iter().find(|s| s.addresses.contains(&"site-a.example.com".to_string())).unwrap().clone();
         let site_b = sites.iter().find(|s| s.addresses.contains(&"site-b.example.com".to_string())).unwrap().clone();
 
-        let sites_arc = Arc::new(vec![site_a, site_b]);
+        let sites_vec = vec![site_a, site_b];
+        let site_index = Arc::new(SiteIndex::build(&sites_vec));
+        let sites_arc = Arc::new(sites_vec);
         let default_site_index = 0usize;
 
         let (client_io, server_io) = tokio::io::duplex(8192);
@@ -1270,6 +1272,7 @@ mod tests {
         tokio::spawn(crate::l7::serve_l7_stream(
             server_io,
             sites_arc,
+            site_index,
             default_site_index,
             peer_addr,
         ));

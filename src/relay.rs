@@ -13,7 +13,7 @@ use tokio::net::{TcpStream, UnixStream};
 use tracing::{debug, warn};
 
 use crate::acme::alpn_challenge::AlpnChallengeRegistry;
-use crate::caddyfile::cluster::matches_site_address;
+use crate::caddyfile::cluster::SiteIndex;
 use crate::caddyfile::model::SiteBlock;
 use crate::config::{BackendAddr, Config};
 use crate::l7::serve_l7_stream;
@@ -47,6 +47,7 @@ fn release_hello_buf(mut buf: Vec<u8>) {
 pub struct RuntimeState {
     config: ArcSwap<Config>,
     sites: ArcSwap<Vec<SiteBlock>>,
+    site_index: ArcSwap<SiteIndex>,
     pub alpn_registry: Arc<AlpnChallengeRegistry>,
     pub tls_acceptor: ArcSwap<Option<tokio_rustls::TlsAcceptor>>,
 }
@@ -58,9 +59,11 @@ impl RuntimeState {
         alpn_registry: Arc<AlpnChallengeRegistry>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     ) -> Self {
+        let site_index = SiteIndex::build(&sites);
         Self {
             config: ArcSwap::from(config),
             sites: ArcSwap::from(sites),
+            site_index: ArcSwap::from_pointee(site_index),
             alpn_registry,
             tls_acceptor: ArcSwap::from_pointee(tls_acceptor),
         }
@@ -74,12 +77,18 @@ impl RuntimeState {
         self.sites.load_full()
     }
 
+    pub fn site_index(&self) -> Arc<SiteIndex> {
+        self.site_index.load_full()
+    }
+
     pub fn update_config(&self, new_config: Arc<Config>) {
         self.config.store(new_config);
     }
 
     pub fn update_sites(&self, new_sites: Arc<Vec<SiteBlock>>) {
+        let index = SiteIndex::build(&new_sites);
         self.sites.store(new_sites);
+        self.site_index.store(Arc::new(index));
     }
 
     pub fn update_tls_acceptor(&self, acceptor: Option<tokio_rustls::TlsAcceptor>) {
@@ -264,18 +273,15 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
     let l4_backend_name = sni.as_deref().and_then(|s| cfg.routes.get(s));
 
     if l4_backend_name.is_none() {
-        // 2. Check L7 sites in sites-enabled/
+        // 2. Check L7 sites in sites-enabled/ via the precomputed host index.
         if let Some(sni_name) = sni.as_deref() {
-            let sites = state.sites();
-            let matched_index = sites.iter().position(|site| {
-                site.addresses
-                    .iter()
-                    .any(|addr| matches_site_address(addr, sni_name))
-            });
+            let index = state.site_index();
+            let matched_index = index.lookup(sni_name);
 
             if let Some(site_index) = matched_index {
                 let acceptor_opt = state.tls_acceptor.load();
                 if let Some(acceptor) = acceptor_opt.as_ref() {
+                    let sites = state.sites();
                     let prefixed = PrefixedStream::new(buf, inbound);
                     let acceptor = acceptor.clone();
                     let sites_arc = Arc::clone(&sites);
@@ -284,7 +290,8 @@ pub async fn handle_conn(inbound: TcpStream, state: Arc<RuntimeState>) {
                     tokio::spawn(async move {
                         match acceptor.accept(prefixed).await {
                             Ok(tls_stream) => {
-                                serve_l7_stream(tls_stream, sites_arc, site_index, peer_addr).await;
+                                serve_l7_stream(tls_stream, sites_arc, index, site_index, peer_addr)
+                                    .await;
                             }
                             Err(e) => {
                                 let err_str = e.to_string();

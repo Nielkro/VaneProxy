@@ -1,12 +1,32 @@
 //! Static asset streaming with MIME detection, path traversal protection,
 //! ETag / Last-Modified conditional caching (304), and byte range requests (206/416).
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, RwLock};
 use std::time::UNIX_EPOCH;
 use bytes::Bytes;
 use hyper::{header, HeaderMap, Method, Response, StatusCode};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+/// Cache of canonicalized site roots: root paths rarely change, so avoid a
+/// `canonicalize()` syscall on every static request.
+static CANONICAL_ROOTS: LazyLock<RwLock<HashMap<PathBuf, PathBuf>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn canonical_root(root: &Path) -> Option<PathBuf> {
+    if let Ok(cache) = CANONICAL_ROOTS.read() {
+        if let Some(cached) = cache.get(root) {
+            return Some(cached.clone());
+        }
+    }
+    let canonical = root.canonicalize().ok()?;
+    if let Ok(mut cache) = CANONICAL_ROOTS.write() {
+        cache.insert(root.to_path_buf(), canonical.clone());
+    }
+    Some(canonical)
+}
 
 /// Checks whether a static file exists relative to the document root (for `file` matcher and `try_files`).
 pub fn check_file_exists(root: &Path, req_path: &str) -> bool {
@@ -235,9 +255,9 @@ pub async fn serve_static_file(
     let target = root.join(clean_path);
 
     // Canonicalize root and target to ensure target stays within root
-    let canonical_root = match root.canonicalize() {
-        Ok(r) => r,
-        Err(_) => return None,
+    let canonical_root = match canonical_root(root) {
+        Some(r) => r,
+        None => return None,
     };
 
     let canonical_target = match target.canonicalize() {
