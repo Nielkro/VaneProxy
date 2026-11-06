@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 use bytes::Bytes;
 use hyper::{header, HeaderMap, Method, Response, StatusCode};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Checks whether a static file exists relative to the document root (for `file` matcher and `try_files`).
 pub fn check_file_exists(root: &Path, req_path: &str) -> bool {
@@ -381,14 +382,23 @@ pub async fn serve_static_file(
                     match range_bounds {
                         Some((start, end)) => {
                             let range_len = (end - start + 1) as usize;
-                            let full_bytes = match fs::read(&file_path).await {
-                                Ok(b) => b,
+                            // Read only the requested range instead of loading the
+                            // whole file and copying a slice out of it.
+                            let mut file = match fs::File::open(&file_path).await {
+                                Ok(f) => f,
                                 Err(_) => return None,
                             };
-                            let slice = full_bytes
-                                .get(start as usize..=end as usize)
-                                .unwrap_or_default()
-                                .to_vec();
+                            if file
+                                .seek(std::io::SeekFrom::Start(start))
+                                .await
+                                .is_err()
+                            {
+                                return None;
+                            }
+                            let mut slice = vec![0u8; range_len];
+                            if file.read_exact(&mut slice).await.is_err() {
+                                return None;
+                            }
 
                             let content_range = format!("bytes {start}-{end}/{file_len}");
                             let resp = Response::builder()
